@@ -19,7 +19,7 @@ wget \
   --page-requisites \
   --convert-links \
   --adjust-extension \
-  --span-hosts=false \
+  --no-span-hosts \
   --domains "$SOURCE_HOST" \
   --reject "$REJECT_EXTENSIONS" \
   --directory-prefix "$WORK_DIR" \
