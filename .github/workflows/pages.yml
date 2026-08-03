@@ -1,0 +1,106 @@
+name: Mirror wumpus.ru/shd to GitHub Pages
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * *'
+  push:
+    branches: [main]
+    paths:
+      - mirror.sh
+      - .github/workflows/pages.yml
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-mirror
+  cancel-in-progress: false
+
+jobs:
+  build-archive-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget rsync
+
+      - name: Verify mirror script version
+        run: |
+          grep -F '2026-08-03-no-wget-convert-links-v2' mirror.sh
+          if grep -Eq -- '--convert-links|--adjust-extension' mirror.sh; then
+            echo "Ошибка: в mirror.sh остались опасные опции wget" >&2
+            exit 1
+          fi
+
+      - name: Build static mirror
+        env:
+          SOURCE_URL: https://wumpus.ru/shd/
+          SOURCE_HOST: wumpus.ru
+          SOURCE_PATH: shd
+          OUTPUT_DIR: public
+        run: ./mirror.sh
+
+      - name: Reject files too large for regular Git
+        run: |
+          large_files="$(find public -type f -size +95M -print)"
+          if [[ -n "$large_files" ]]; then
+            echo "После исключения minio остались файлы крупнее 95 MiB:" >&2
+            printf '%s\n' "$large_files" >&2
+            exit 1
+          fi
+
+      - name: Save verified mirror to mirror branch
+        env:
+          ARCHIVE_BRANCH: mirror
+        run: |
+          set -Eeuo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          archive_dir="$(mktemp -d)"
+          trap 'git worktree remove --force "$archive_dir" 2>/dev/null || true' EXIT
+
+          if git ls-remote --exit-code --heads origin "$ARCHIVE_BRANCH" >/dev/null 2>&1; then
+            git fetch origin "$ARCHIVE_BRANCH"
+            git worktree add --detach "$archive_dir" "origin/$ARCHIVE_BRANCH"
+          else
+            git worktree add --detach "$archive_dir"
+            git -C "$archive_dir" checkout --orphan "$ARCHIVE_BRANCH"
+            git -C "$archive_dir" rm -rf --ignore-unmatch .
+          fi
+
+          rsync -a --delete --exclude='.git' public/ "$archive_dir"/
+
+          git -C "$archive_dir" add -A
+          if git -C "$archive_dir" diff --cached --quiet; then
+            echo "В зеркале нет изменений"
+          else
+            git -C "$archive_dir" commit -m "Update mirror $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git -C "$archive_dir" push origin "HEAD:$ARCHIVE_BRANCH"
+          fi
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: public
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v5
