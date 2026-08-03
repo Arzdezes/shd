@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="ru-RU">
+
+  <head>
+    <title>SHD</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="shd.css">
+  </head>
+
+<body>
+
+<h1>Лабораторная работа: Знакомство с BTRFS</h1>
+
+<p><strong>Тема:</strong> Создание BTRFS-томов, работа с подтомами (subvolumes), снапшотами,
+управление RAID-профилями и понимание особенностей управления пространством.</p>
+
+<p><strong>Цель работы:</strong> На практике освоить основные
+команды BTRFS, понять разницу между подтомами и снапшотами, научиться
+изменять RAID-профили на лету, а также разобраться, почему <code class="cmd">df</code>
+и <code class="cmd">btrfs filesystem usage</code> показывают разные цифры.</p>
+
+<hr/>
+
+<h2>Подготовка</h2>
+
+
+<p><strong>Переключение в режим администратора</strong></p>
+
+<pre class="bash">
+su -
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Дальнейшие команды выполняются от имени root. Будьте внимательны
+— вы работаете с привилегированным доступом.
+</div>
+
+<p><strong>Установка BTRFS</strong></p>
+
+<pre class="bash">
+apt-get update
+apt-get install btrfs-progs
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> BTRFS — это файловая система, встроенная в ядро Linux. Утилиты для работы
+с ней поставляются в пакете <code>btrfs-progs</code>
+</div>
+
+
+<p><strong>Загрузка модуля ядра</strong></p>
+
+<pre class="bash">
+modprobe btrfs
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Модуль ядра загружается автоматически при монтировании BTRFS, но
+для уверенности можно выполнить вручную.
+</div>
+
+
+<p><strong>Создание loop-устройств для имитации дисков</strong></p>
+
+<p>Очищаем предыдущие назначения</p>
+
+<pre class="bash">
+losetup -D
+</pre>
+
+<p>Создаём 5 файлов-образов по 500 МБ каждый и назначаем их loop-устройствам</p>
+
+<pre class="bash">
+cd ~
+mkdir btrfs_lab
+cd btrfs_lab
+for i in {1..5}; do dd if=/dev/zero of=disk$i.img bs=1M count=500; losetup /dev/loop$i ./disk$i.img; done
+</pre>
+
+<p>Проверяем, что получилось</p>
+
+<pre class="bash">
+lsblk | grep loop
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Мы создали 5 виртуальных дисков по 500 МБ каждый.
+Явное назначение номеров гарантирует, что у всех студентов устройства называются одинаково.
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 1: Создание BTRFS-тома на одном диске</h2>
+
+<h3>1.1 Форматирование и монтирование</h3>
+
+<p>Создаём BTRFS на одном диске</p>
+
+<pre class="bash">
+mkfs.btrfs -L mybtrfs /dev/loop1
+</pre>
+
+<p>Создаём точку монтирования и монтируем</p>
+
+<pre class="bash">
+mkdir /mnt/btrfs
+mount /dev/loop1 /mnt/btrfs
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Что вы видите в выводе <code>mkfs.btrfs</code>?
+Какие профили по умолчанию используются для данных и метаданных?</p>
+
+<p><strong>Пояснение:</strong> При создании BTRFS на одном диске данные обычно
+получают профиль <code>single</code> (одна копия), а метаданные — <code>dup</code> (две копии в
+ разных местах диска). Это важно для надёжности.</p>
+</div>
+
+<h3>1.2 Изучение структуры</h3>
+
+<p>Посмотрим информацию о файловой системе</p>
+
+<pre class="bash">
+btrfs filesystem show
+btrfs filesystem df /mnt/btrfs
+df -h /mnt/btrfs
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Обратите внимание на разницу между <code class="cmd">df</code>
+и <code class="cmd">btrfs filesystem df</code>.  Почему цифры отличаются?</p>
+
+<p><strong>Пояснение:</strong> <code class="cmd">df</code> показывает свободное место в соответствии
+со стандартным механизмом ядра, а <code class="cmd">btrfs filesystem df</code> —
+внутреннюю статистику BTRFS. Разница возникает из-за резервирования
+места под метаданные и механизма CoW.</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 2: Подтома (Subvolumes)</h2>
+
+<h3>2.1 Создание подтомов</h3>
+
+<p>Подтома — это изолированные файловые системы внутри одного BTRFS-тома. Они
+похожи на разделы, но используют общее пространство.</p>
+
+<p>Создаём подтома</p>
+
+<pre class="bash">
+btrfs subvolume create /mnt/btrfs/@home
+btrfs subvolume create /mnt/btrfs/@data
+btrfs subvolume create /mnt/btrfs/@backup
+</pre>
+
+<p>Смотрим список подтомов</p>
+
+<pre class="bash">
+btrfs subvolume list /mnt/btrfs
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Что показывает команда <code class="cmd">btrf
+subvolume list</code>? Обратите внимание на ID подтомов.</p>
+
+<p><strong>Пояснение:</strong>Каждый подтом имеет уникальный ID. Подтома не являются
+директориями в обычном смысле — они монтируются отдельно. Сейчас они видны
+как папки, потому что мы создали их внутри смонтированного корня.</p>
+</div>
+
+<h3>2.2 Правильное монтирование подтомов</h3>
+
+<p>Создаём точки монтирования для подтомов</p>
+
+<pre class="bash">
+mkdir /mnt/home /mnt/data /mnt/backup
+</pre>
+
+<p>Монтируем подтома с использованием subvolid</p>
+ 
+<pre class="bash">
+umount /mnt/btrfs
+mount -t btrfs -o subvolid=256 /dev/loop1 /mnt/home
+mount -t btrfs -o subvolid=257 /dev/loop1 /mnt/data
+mount -t btrfs -o subvolid=258 /dev/loop1 /mnt/backup
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Что произойдёт, если смонтировать корневой том снова?
+С какими опциями нужно монтировать подтома при загрузке?</p>
+
+<p><strong>Пояснение:</strong> Подтома монтируются отдельно, как независимые файловые
+системы. Корневой подтом (ID 5) содержит в себе иерархию папок, но при монтировании
+подтомов напрямую их содержимое становится видно в точке монтирования.</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 3: Снапшоты</h2>
+
+<h3>3.1 Создание данных и снапшота</h3>
+
+<p>Создаём тестовые файлы в подтоме @home</p>
+
+<pre class="bash">
+echo &quot;Важные данные&quot; &gt; /mnt/home/important.txt
+echo &quot;Секреты&quot; &gt; /mnt/home/secret.txt
+</pre>
+
+<p>Создаём read-only снапшот</p>
+
+<pre class="bash">
+btrfs subvolume snapshot -r /mnt/home /mnt/home_snap
+</pre>
+
+<p>Смотрим список</p>
+
+<pre class="bash">
+btrfs subvolume list /mnt/btrfs
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Какой ID у созданного снапшота? Почему команда
+<code>snapshot</code> выполнилась так быстро?</p>
+
+<p><strong>Пояснение:</strong> Снапшот в BTRFS — это мгновенная операция. Он не копирует
+данные, а создаёт новую точку в дереве файловой системы, ссылающуюся на те же
+блоки данных. Место начинает заниматься только при изменении оригинальных
+данных (CoW).</p>
+</div>
+
+<h3>3.2 Изменение данных и наблюдение</h3>
+
+<p>Модифицируем файл в оригинале</p>
+
+<pre class="bash">
+echo &quot;Дополнительная строка&quot; &gt;&gt; /mnt/home/important.txt
+</pre>
+
+<p>Удаляем файл</p>
+
+<pre class="bash">
+rm /mnt/home/secret.txt
+</pre>
+
+<p>Создаём новый файл</p>
+
+<pre class="bash">
+echo &quot;Новый файл&quot; &gt; /mnt/home/newfile.txt
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Как вы думаете, изменилось ли содержимое снапшота?</p>
+</div>
+
+<p>Проверяем содержимое снапшота</p>
+
+<pre class="bash">
+cat /mnt/home_snap/important.txt
+ls /mnt/home_snap/
+</pre>
+
+<div class="explanation">
+<p><strong>Пояснение:</strong> Снапшот сохранил исходное состояние: файл
+<code>important.txt</code> без дополнительной строки, файл <code>secret.txt</code>
+существует, файла <code>newfile.txt</code> нет. Это демонстрирует механизм Copy-on-Write
+— старые блоки данных сохраняются для снапшота.</p>
+</div>
+
+<h3>3.3 Монтирование снапшота для восстановления</h3>
+
+<p>Создаём точку монтирования для снапшота</p>
+
+<pre class="bash">
+mkdir /mnt/restore
+</pre>
+
+<p>Монтируем снапшот</p>
+
+<pre class="bash">
+mount -t btrfs -o subvolid=ID_СНАПШОТА /dev/loop1 /mnt/restore
+</pre>
+
+<p>Копируем данные обратно</p>
+
+<pre class="bash">
+cp -r /mnt/restore/* /mnt/home/
+</pre>
+
+<p>Проверяем</p>
+
+<pre class="bash">
+ls /mnt/home/
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Какой командой можно смонтировать снапшот,
+зная его путь, а не ID?</p>
+<p><strong>Пояснение:</strong>Снапшоты — отличный инструмент для быстрого восстановления.
+В современных дистрибутивах снапшоты используются для отката системы после обновлений.</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 4: Управление RAID-профилями</h2>
+
+<h3>4.1 Добавление дисков</h3>
+
+<p>Добавляем второй диск</p>
+
+<pre class="bash">
+btrfs device add /dev/loop2 /mnt/home
+</pre>
+
+<p>Проверяем</p>
+
+<pre class="bash">
+btrfs filesystem show
+btrfs device usage /mnt/home
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Изменился ли доступный объём после добавления диска? Почему?</p>
+<p><strong>Пояснение:</strong> Добавление диска само по себе не увеличивает полезное
+пространство — данные всё ещё используют профиль <code>single</code>.
+Нужно перебалансировать файловую систему.</p>
+</div>
+
+<h3>4.2 Преобразование в RAID1</h3>
+
+<p>Преобразуем данные и метаданные в RAID1</p>
+
+<pre class="bash">
+btrfs balance start -dconvert=raid1 -mconvert=raid1 /mnt/home
+</pre>
+
+<p>Следим за процессом в другом терминале (опционально)</p>
+
+<pre class="bash">
+watch -n 1 btrfs balance status /mnt/home
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Как изменился вывод <code class="cmd">btrfs filesystem df</code>
+после балансировки? Сколько полезного места теперь доступно?</p>
+
+<p><strong>Пояснение:</strong> RAID1 в BTRFS означает &quot;две копии данных
+на разных устройствах&quot;.  Полезный объём при двух дисках равен объёму меньшего диска.</p>
+</div>
+
+<p>Проверяем результат</p>
+
+<pre class="bash">
+btrfs filesystem df /mnt/home
+btrfs filesystem usage /mnt/home
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Что показывает <code>Device unallocated</code> и
+как это связано со свободным местом?</p>
+
+<p><strong>Пояснение:</strong><code>Device unallocated</code> — это блоки, которые ещё
+не назначены ни для данных, ни для метаданных. Они могут быть использованы
+при дальнейшей балансировке. <code>Free (estimated)</code> — это оценка реально
+доступного места для пользовательских данных.</p>
+</div>
+
+<h3>4.3 Добавление третьего диска и переход на RAID10</h3>
+
+<p>Добавляем третий диск</p>
+
+<pre class="bash">
+btrfs device add /dev/loop3 /mnt/home
+</pre>
+
+<p>Попытка перейти на RAID10</p>
+
+<pre class="bash">
+btrfs balance start -dconvert=raid10 -mconvert=raid10 /mnt/home
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong>Что произошло? Почему команда не выполнилась?</p>
+
+<p><strong>Пояснение:</strong> Для RAID10 нужно минимум 4 диска. BTRFS проверяет
+это перед началом балансировки и выдаёт ошибку.</p>
+</div>
+
+<p>Добавляем четвёртый диск</p>
+
+<pre class="bash">
+btrfs device add /dev/loop4 /mnt/home
+</pre>
+
+<p>Теперь RAID10 работает</p>
+
+<pre class="bash">
+btrfs balance start -dconvert=raid10 -mconvert=raid10 /mnt/home
+btrfs filesystem usage /mnt/home
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Как изменилась эффективность использования места при
+переходе с RAID1 на RAID10?</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 5: Иллюзия свободного места — почему <code class="cmd">df</code> врёт</h2>
+
+<h3>5.1 Создание ситуации с незаметным заполнением</h3>
+
+<p>Создаём много снапшотов</p>
+
+<pre class="bash">
+btrfs subvolume snapshot -r /mnt/home /mnt/home_snap1
+dd if=/dev/urandom of=/mnt/home/bigfile1.dat bs=1M count=100
+
+btrfs subvolume snapshot -r /mnt/home /mnt/home_snap2
+dd if=/dev/urandom of=/mnt/home/bigfile2.dat bs=1M count=100
+
+btrfs subvolume snapshot -r /mnt/home /mnt/home_snap3
+dd if=/dev/urandom of=/mnt/home/bigfile3.dat bs=1M count=100
+</pre>
+
+<h3>5.2 Сравнение выводов</h3>
+
+<p>Смотрим, что показывает <code class="cmd">df</code></p>
+
+<pre class="bash">
+df -h /mnt/home
+</pre>
+
+<p>Смотрим реальную картину</p>
+
+<pre class="bash">
+btrfs filesystem usage /mnt/home
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Почему <code class="cmd">df</code>
+показывает, что свободно 150 МБ, а <code class="cmd">btrfs
+filesystem usage</code> говорит, что занято
+почти всё место?</p>
+
+<p><strong>Пояснение:</strong> <code class="cmd">df</code>
+показывает только текущее состояние файловой системы, не учитывая снапшоты,
+которые хранят старые версии данных.  Снапшоты могут занимать значительное
+место, и это место не видно в <code class="cmd">df</code>.
+Вот почему для BTRFS важно использовать <code class="cmd">btrfs filesystem usage</code>.</p>
+</div>
+
+<h3>5.3 Удаление снапшотов и освобождение места</h3>
+
+<p>Удаляем снапшоты по одному</p>
+
+<pre class="bash">
+btrfs subvolume delete /mnt/home_snap1
+btrfs subvolume delete /mnt/home_snap2
+btrfs subvolume delete /mnt/home_snap3
+</pre>
+
+<p>Проверяем освобождение</p>
+
+<pre class="bash">
+btrfs filesystem usage /mnt/home
+</pre>
+
+<div class="explanation">
+<p><strong>Пояснение:</strong> После удаления всех снапшотов, ссылающихся на старые блоки
+данных, место освобождается. Но может потребоваться балансировка, чтобы BTRFS
+перераспределила освободившееся пространство.</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 6: Scrub и проверка целостности</h2>
+
+<p>Запускаем проверку целостности данных</p>
+
+<pre class="bash">
+btrfs scrub start /mnt/home
+</pre>
+
+<p>Смотрим статус</p>
+
+<pre class="bash">
+btrfs scrub status /mnt/home
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Что делает <code class="cmd">scrub</code>? В чём его отличие от
+<code class="cmd">fsck</code>?</p>
+
+<p><strong>Пояснение:</strong><code class="cmd">scrub</code> проверяет все
+данные и метаданные на диске на предмет ошибок. В отличие от <code class="cmd">fsck</code>,
+он работает на смонтированной файловой системе и исправляет ошибки, используя избыточность
+(в RAID-конфигурациях).</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 7: Очистка</h2>
+
+<p>Размонтируем всё</p>
+
+<pre class="bash">
+umount /mnt/restore
+umount /mnt/home
+umount /mnt/data
+umount /mnt/backup
+umount /mnt/home_snap
+</pre>
+
+<p>Отключаем loop-устройства</p>
+
+<pre class="bash">
+losetup -D
+</pre>
+
+<p>Удаляем файлы-образы</p>
+
+<pre class="bash">
+cd ~
+rm -rf btrfs_lab
+</pre>
+
+<hr/>
+
+
+
+<h2>Контрольные вопросы</h2>
+<ol>
+	<li>В чём разница между подтомом (subvolume) и снапшотом в BTRFS?</li>
+	<li>Какой минимальное количество дисков нужно для RAID10 в BTRFS?</li>
+	<li>Почему <code class="cmd">df</code> может показывать неверную информацию
+		о свободном месте на BTRFS?</li>
+	<li>Что произойдёт с данными, если выполнить <code class="cmd">btrfs
+		balance start</code> без фильтров?</li>
+	<li>Как проверить целостность данных на BTRFS-томе?</li>
+	<li>Как добавить новый диск в существующий BTRFS-том и перераспределить данные?</li>
+	<li>Что означает <code>Device unallocated</code> в выводе <code
+		class="cmd">btrfs filesystem usage</code>?</li>
+	<li>Почему RAID1 в BTRFS с двумя дисками даёт полезный объём, равный объёму
+		одного диска?</li>
+</ol>
+
+<hr/>
+
+
+
+<h2>Выводы</h2>
+
+<ul>
+	<li>BTRFS объединяет управление томами, подтомами и снапшотами в одной файловой
+		системе.</li>
+	<li>Подтома — это изолированные файловые системы внутри одного BTRFS-тома.</li>
+	<li>Снапшоты в BTRFS мгновенны и сначала не занимают места, но могут &quot;съесть&quot;
+		всё пространство незаметно для <code class="cmd">df</code>.</li>
+	<li>BTRFS позволяет изменять RAID-профили на лету с помощью <code class="cmd">btrfs
+		balance</code>.</li>
+	<li>Для мониторинга свободного места нужно использовать <code class="cmd">btrfs
+		filesystem usage</code>, а не <code class="cmd">df</code>.</li>
+	<li><code>scrub</code> — инструмент для проверки и восстановления целостности данных.</li>
+</ul>
+
+<hr/>
+
+</body>
+</html>

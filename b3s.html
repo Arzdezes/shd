@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ru-RU">
+
+  <head>
+    <title>SHD</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="shd.css">
+  </head>
+
+<body>
+
+    <h2>LVM: Физические тома (PV) и Группы томов (VG)</h2>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Действие</th>
+          <th>Команда</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Создание PV</td>
+          <td>pvcreate /dev/sdb1<br/> pvcreate /dev/sdc #целый диск</td>
+        </tr>
+        <tr>
+          <td>Просмотр PV (кратко)</td>
+          <td>pvs</td>
+        </tr>
+        <tr>
+          <td>Просмотр PV (детально)</td>
+          <td>pvdisplay</td>
+        </tr>
+        <tr>
+          <td>Удаление PV</td>
+          <td>pvremove /dev/sdb1 #предварительно убрать из VG</td>
+        </tr>
+        <tr>
+          <td>Создание VG</td>
+          <td>vgcreate vg_name /dev/sdb1 /dev/sdc1</td>
+        </tr>
+        <tr>
+          <td>Просмотр VG (кратко)</td>
+          <td>vgs</td>
+        </tr>
+        <tr>
+          <td>Просмотр VG (детально)</td>
+          <td>vgdisplay vg_name</td>
+        </tr>
+        <tr>
+          <td>Добавить PV в VG</td>
+          <td>vgextend vg_name /dev/sdd1</td>
+        </tr>
+        <tr>
+          <td>Убрать PV из VG</td>
+          <td>vgreduce vg_name /dev/sdd1 #сначала pvmove</td>
+        </tr>
+        <tr>
+          <td>Удалить VG</td>
+          <td>vgremove vg_name</td>
+        </tr>
+        <tr>
+          <td>Бэкап метаданных</td>
+          <td>vgcfgbackup vg_name</td>
+        </tr>
+      </tbody>
+    </table>
+    <hr/>
+
+    <h2>LVM: Логические тома (LV) — толстые (thick)</h2>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Действие</th>
+          <th>Команда</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Создать LV (указать размер)</td>
+          <td>lvcreate -n lv_name -L 10G vg_name</td>
+        </tr>
+        <tr>
+          <td>Создать LV (занять всё место)</td>
+          <td>lvcreate -n lv_name -l 100%FREE vg_name</td>
+        </tr>
+        <tr>
+          <td>Просмотр LV (кратко)</td>
+          <td>lvs</td>
+        </tr>
+        <tr>
+          <td>Просмотр LV (детально)</td>
+          <td>lvdisplay vg_name/lv_name</td>
+        </tr>
+        <tr>
+          <td>Форматирование</td>
+          <td>mkfs.ext4 /dev/vg_name/lv_name</td>
+        </tr>
+        <tr>
+          <td>Монтирование</td>
+          <td>mount /dev/vg_name/lv_name /mnt/point
+          </td>
+        </tr>
+        <tr>
+          <td>Удалить LV</td>
+          <td>lvremove vg_name/lv_name</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <hr/>
+
+    <h2>LVM: Расширение и уменьшение</h2>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Действие</th>
+          <th>Команда</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Расширить LV на +5 ГБ</td>
+          <td>lvextend -L +5G /dev/vg_name/lv_name </td>
+        </tr>
+        <tr>
+          <td>Расширить LV до 20 ГБ</td>
+          <td>lvextend -L 20G /dev/vg_name/lv_name</td>
+        </tr>
+        <tr>
+          <td>Расширить LV + авто-расширение ФС</td>
+          <td>lvextend -r -L +5G /dev/vg_name/lv_name
+          </td>
+        </tr>
+        <tr>
+          <td>Расширить ФС ext4 после lvextend</td>
+          <td>resize2fs /dev/vg_name/lv_name</td>
+        </tr>
+        <tr>
+          <td>Расширить ФС XFS после lvextend</td>
+          <td>xfs_growfs /mnt/point  #точка монтирования</td>
+        </tr>
+        <tr>
+          <td>Уменьшение (только для ext4!)</td>
+          <td>
+               1. umount /mnt/point                    <br/>
+               2. e2fsck -f /dev/vg_name/lv_name       <br/>
+               3. resize2fs /dev/vg_name/lv_name 15G   <br/>
+               4. lvreduce -L 15G /dev/vg_name/lv_name <br/>
+               5. mount /dev/vg_name/lv_name /mnt/point
+          </td>
+        </tr>
+        <tr>
+          <td>Перемещение данных с диска</td>
+          <td>pvmove /dev/sdb1 #переносит все данные с sdb1 на другие PV в VG</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <hr/>
+
+    <h2>LVM: Снапшоты и тонкие тома (thin)</h2>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Действие</th>
+          <th>Команда</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Создать классический снапшот</td>
+          <td>lvcreate -s -n snap_name -L 2G /dev/vg_name/original_lv</td>
+        </tr>
+        <tr>
+          <td>Создать снапшот в thin pool</td>
+          <td>lvcreate -s -n snap_name vg_name/thin_volume</td>
+        </tr>
+        <tr>
+          <td>Откат к снапшоту</td>
+          <td>
+               umount /dev/vg_name/original_lv <br/>
+               lvconvert --merge /dev/vg_name/snap_name
+          </td>
+        </tr>
+        <tr>
+          <td>Удалить снапшот</td>
+          <td>lvremove /dev/vg_name/snap_name</td>
+        </tr>
+        <tr>
+          <td>Создать thin pool (50 ГБ)</td>
+          <td>lvcreate -L 50G -T vg_name/thin_pool</td>
+        </tr>
+        <tr>
+          <td>Создать тонкий том (200Г виртуально)</td>
+          <td>lvcreate -V 200G -T vg_name/thin_pool -n thin_vol</td>
+        </tr>
+        <tr>
+          <td>Просмотр тонких пулов</td>
+          <td>lvs -a -o+discard #смотреть процент заполнения</td>
+        </tr>
+        <tr>
+          <td>Расширить thin pool</td>
+          <td>lvextend -L +20G vg_name/thin_pool</td>
+        </tr>
+      </tbody>
+    </table>
+
+  </body>
+</html>

@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="ru-RU">
+
+  <head>
+    <title>SHD</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="shd.css">
+  </head>
+
+<body>
+
+<h1>Лабораторная работа 1: Программный RAID (mdadm)</h1>
+
+<div class="warning">
+<strong>Важно:</strong> Для выполнения команд с правами администратора
+мы будем использовать <code class="cmd">su -</code>.<br/>
+Переключитесь в режим root на обеих машинах.
+</div>
+
+<h2>1. Подготовка loop-устройств</h2>
+
+<p>Создадим файлы-образы (4 штуки по 100 МБ)</p>
+
+<pre class="bash">
+for i in {1..4}; do dd if=/dev/zero of=disk$i.img bs=1M count=100; done
+</pre>
+
+<p>Подключим все образы как loop-устройства</p>
+
+<pre class="bash">
+for i in {1..4}; do losetup -fP disk$i.img; done
+</pre>
+
+<p>Посмотрим, какие устройства получились</p>
+
+<pre class="bash">
+losetup -a                     # Список всех loop
+lsblk                          # Древовидный вывод
+</pre>
+
+
+
+<h2>2. Создание RAID-массивов</h2>
+
+<p><strong>Синтаксис:</strong> <code class="cmd">mdadm
+--create /dev/md&lt;N&gt; --level=&lt;L&gt; --raid-devices=&lt;X&gt;
+&lt;устройства&gt;</code></p>
+
+<p>RAID 0 (чередование) на двух дисках</p>
+
+<pre class="bash">
+mdadm --create /dev/md0 --level=0 --raid-devices=2 /dev/loop0 /dev/loop1
+</pre>
+
+<p>RAID 1 (зеркало) на двух дисках</p>
+
+<pre class="bash">
+mdadm --create /dev/md1 --level=1 --raid-devices=2 /dev/loop2 /dev/loop3
+</pre>
+
+<p>RAID 5 (чётность) на трёх дисках</p>
+
+<pre class="bash">
+mdadm --create /dev/md5 --level=5 --raid-devices=3 /dev/loop0 /dev/loop1 /dev/loop2
+</pre>
+
+<p>RAID 10 (комбинация) на четырёх дисках</p>
+
+<pre class="bash">
+mdadm --create /dev/md10 --level=10 --raid-devices=4 /dev/loop0 /dev/loop1 /dev/loop2 /dev/loop3
+</pre>
+
+<p>Полезные флаги:</p>
+<ul>
+	<li><code>--verbose</code> или <code>-v</code> — подробный вывод</li>
+	<li><code>--force</code> — принудительное создание (если ругается на суперблоки)</li>
+</ul>
+
+
+
+<h2>3. Наблюдение и мониторинг</h2>
+
+<p>Самый главный файл — статус RAID в реальном времени</p>
+
+<pre class="bash">
+cat /proc/mdstat
+</pre>
+
+<p>Слежение за процессом синхронизации (обновление каждую секунду)</p>
+
+<pre class="bash">
+watch -n 1 cat /proc/mdstat
+</pre>
+
+<p>Детальная информация о конкретном массиве</p>
+
+<pre class="bash">
+mdadm --detail /dev/md0
+</pre>
+
+<p>Краткая информация (аналог --detail, но короче)</p>
+
+<pre class="bash">
+mdadm --query /dev/md0
+</pre>
+
+<p>Проверка диска, входящего в массив</p>
+
+<pre class="bash">
+mdadm --examine /dev/loop0    # Информация о суперблоке на конкретном диске
+</pre>
+
+<h2>4. Работа с массивом (файловая система)</h2>
+
+<p>Создадим файловую систему на RAID</p>
+
+<pre class="bash">
+mkfs.ext4 /dev/md0
+mkfs.xfs /dev/md1             # Можно и XFS для разнообразия
+</pre>
+
+<p>Создадим точки монтирования</p>
+
+<pre class="bash">
+mkdir -p /mnt/raid{0,1,5}
+</pre>
+
+<p>Примонтируем</p>
+
+<pre class="bash">
+mount /dev/md0 /mnt/raid0
+mount /dev/md1 /mnt/raid1
+</pre>
+
+<p>Проверим монтирование и размеры</p>
+
+<pre class="bash">
+df -h | grep md
+</pre>
+
+
+
+<h2>5. Имитация поломок и восстановление</h2>
+
+<p><strong>Работа с отдельными дисками:</strong></p>
+
+<p>Пометить диск как сбойный (FAIL)</p>
+
+<pre class="bash">
+mdadm /dev/md1 --fail /dev/loop2
+</pre>
+
+<p>Удалить сбойный диск из массива</p>
+
+<pre class="bash">
+mdadm /dev/md1 --remove /dev/loop2
+</pre>
+
+<p>Добавить новый диск (или пере-добавить старый)</p>
+
+<pre class="bash">
+mdadm /dev/md1 --add /dev/loop4     # Добавить новый диск
+mdadm /dev/md1 --re-add /dev/loop2  # Попытаться вернуть старый
+</pre>
+
+<p>Временно отключть диск (имитация &quot;шатания&quot; контакта)</p>
+
+<pre class="bash">
+mdadm /dev/md1 --set-faulty /dev/loop2
+mdadm /dev/md1 --remove /dev/loop2
+# ... подождать ...
+mdadm /dev/md1 --add /dev/loop2
+</pre>
+
+<p><strong>Работа с массивом целиком:</strong></p>
+
+<p>Остановить массив</p>
+
+<pre class="bash">
+mdadm --stop /dev/md0
+</pre>
+
+<p>Запустить (собрать) существующий массив</p>
+
+<pre class="bash">
+mdadm --assemble /dev/md0 /dev/loop0 /dev/loop1
+</pre>
+
+<p>Автоматически собрать все массивы из конфига</p>
+
+<pre class="bash">
+mdadm --assemble --scan
+</pre>
+
+<p>Пересобрать массив вручную, игнорируя ошибки</p>
+
+<pre class="bash">
+mdadm --assemble --force /dev/md0 /dev/loop0 /dev/loop1
+</pre>
+
+<h2>6. Полная зачистка (между лабораторными)</h2>
+
+<p>Отмонтировать всё</p>
+
+<pre class="bash">
+umount /mnt/raid*
+</pre>
+
+<p>Остановить все RAID массивы</p>
+
+<pre class="bash">
+mdadm --stop /dev/md*
+</pre>
+
+<p>Очистить суперблоки на дисках (важно!)</p>
+
+<pre class="bash">
+for i in {0..3}; do mdadm --zero-superblock /dev/loop$i; done
+</pre>
+
+<p>Отключить loop-устройства</p>
+
+<pre class="bash">
+for i in {0..3}; do losetup -d /dev/loop$i; done
+</pre>
+
+<p>Удалить файлы-образы (осторожно!)</p>
+
+<pre class="bash">
+rm -f disk*.img
+</pre>
+
+<p>Проверить, что всё чисто</p>
+
+<pre class="bash">
+losetup -a        # Должен быть пусто
+cat /proc/mdstat  # Должен быть пусто
+</pre>
+
+<h2>7. Часто возникающие проблемы и их решение</h2>
+
+<table>
+	<thead>
+		<tr>
+			<th>Проблема</th>
+			<th>Команда</th>
+		</tr>
+	</thead>
+	<tbody>
+		<tr>
+			<td>&quot;Device or resource busy&quot; при попытке остановить массив</td>
+			<td><code class="cmd">umount /dev/md0</code> сначала, потом
+				<code class="cmd">mdadm --stop</code></td>
+		</tr>
+		<tr>
+			<td>&quot;No superblock found&quot; при добавлении диска</td>
+			<td>Очистите суперблок: <code class="cmd">mdadm --zero-superblock
+				/dev/loop0</code>
+			</td>
+		</tr>
+		<tr>
+			<td>Массив не собирается после перезагрузки</td>
+			<td>Проверьте
+				<code>/etc/mdadm/mdadm.conf</code> и сделайте
+				<code class="cmd">update-initramfs -u</code></td>
+		</tr>
+		<tr>
+			<td>Хочу поменять уровень RAID</td>
+			<td>Нельзя. Только создать новый массив и скопировать данные</td>
+		</tr>
+		<tr>
+			<td>Loop-устройства пропали после перезагрузки</td>
+			<td>Это нормально.<br/>
+				Подключите заново: <code class="cmd">for i in
+				{1..4}; do losetup -fP disk$i.img; done</code></td>
+		</tr>
+		<tr>
+			<td>Хочу посмотреть, что за массив был на диске</td>
+			<td><code class="cmd">mdadm --examine /dev/loop0</code></td>
+		</tr>
+	</tbody>
+</table>
+
+
+
+<h2>8. Пример полного цикла работы (RAID 1)</h2>
+
+<p>1. Подготовка</p>
+
+<pre class="bash">
+dd if=/dev/zero of=disk1.img bs=1M count=100
+dd if=/dev/zero of=disk2.img bs=1M count=100
+losetup -fP disk1.img
+losetup -fP disk2.img
+</pre>
+
+<p>2. Создание RAID 1</p>
+
+<pre class="bash">
+mdadm --create /dev/md1 --level=1 --raid-devices=2 /dev/loop0 /dev/loop1
+</pre>
+
+<p>3. Форматирование и монтирование</p>
+
+<pre class="bash">
+mkfs.ext4 /dev/md1
+mkdir /mnt/raid1
+mount /dev/md1 /mnt/raid1
+</pre>
+
+<p>4. Работа с данными</p>
+
+<pre class="bash">
+echo &quot;test&quot; &gt; /mnt/raid1/test.txt
+</pre>
+
+<p>5. Поломка</p>
+
+<pre class="bash">
+mdadm /dev/md1 --fail /dev/loop0
+mdadm /dev/md1 --remove /dev/loop0
+</pre>
+
+<p>6. Починка (используем новый диск loop2)</p>
+
+<pre class="bash">
+losetup -fP disk3.img            # Создали новый образ
+mdadm /dev/md1 --add /dev/loop2
+</pre>
+
+<p>7. Наблюдаем восстановление</p>
+
+<pre class="bash">
+watch cat /proc/mdstat
+</pre>
+
+<hr/>
+
+</body>
+</html>

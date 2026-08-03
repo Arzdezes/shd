@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="ru-RU">
+
+  <head>
+    <title>SHD</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="shd.css">
+  </head>
+
+<body>
+
+<h1 class="western">Лабораторная работа №2: Отказоустойчивость и масштабирование Ceph</h1>
+
+<p><strong>Цель работы:</strong> Протестировать отказоустойчивость кластера Ceph при выходе из
+строя узлов и OSD, настроить высокую доступность виртуальных машин, добавить новый узел в
+кластер.</p>
+
+<hr/>
+
+<h2>Подготовка</h2>
+
+<p>Убедитесь, что кластер из лабораторной работы №1 работает:</p>
+
+<pre class="bash">
+# На любом узле проверяем статус
+ceph -s
+pvecm status
+
+# На всех узлах проверяем, что Ceph OSD активны
+ceph osd tree
+</pre>
+
+<hr/>
+
+<h2>Этап 1: Тестирование отказоустойчивости Ceph</h2>
+
+<h3>1.1 Текущая конфигурация кластера</h3>
+
+<pre class="bash">
+# Выводим дерево OSD
+ceph osd tree
+
+# Выводим карту распределения PG
+ceph pg stat
+</pre>
+
+<p class="explanation"><strong>Ожидаемый результат:</strong> Например, 3 узла, на каждом по 2 OSD
+(всего 6 OSD), репликация 3 копий.</p>
+
+<h3>1.2 Симуляция отказа одного OSD</h3>
+
+<p><strong>На узле, где находится отключаемый OSD:</strong></p>
+
+<pre class="bash">
+# Останавливаем OSD (например, osd.0)
+systemctl stop ceph-osd@0
+
+# Проверяем статус кластера (на любом узле)
+ceph osd tree
+ceph -s
+</pre>
+
+<p class="explanation"><strong>Вопрос:</strong> Что произошло с состоянием OSD? Как изменился
+статус кластера?</p>
+
+<p><strong>Восстановление OSD:</strong></p>
+
+<pre class="bash">
+# Запускаем OSD обратно
+systemctl start ceph-osd@0
+
+# Наблюдаем за процессом восстановления
+watch -n 1 ceph -s
+</pre>
+
+<p class="explanation"><strong>Пояснение:</strong> Ceph автоматически обнаруживает падение OSD и
+начинает репликацию данных на другие OSD для восстановления нужного числа копий.</p>
+
+<h3>1.3 Симуляция отказа целого узла</h3>
+
+<p><strong>На отключаемом узле (например, PVE-03):</strong></p>
+
+<pre class="bash">
+# Выключаем узел (или просто останавливаем Ceph)
+systemctl stop ceph-mon
+systemctl stop ceph-osd
+</pre>
+
+<p><strong>На любом работающем узле:</strong></p>
+
+<pre class="bash">
+# Проверяем статус кластера
+ceph -s
+ceph osd tree
+
+# Проверяем состояние PG (должны быть active+degraded)
+ceph pg stat
+</pre>
+
+<p class="explanation"><strong>Вопрос:</strong> Доступны ли данные при отказе целого узла? Какие
+PG перешли в состояние degraded?</p>
+
+<p><strong>Восстановление узла:</strong></p>
+
+<p>На отключённом узле:</p>
+
+<pre class="bash">
+systemctl start ceph-mon
+systemctl start ceph-osd
+</pre>
+
+<p> На работающем узле наблюдаем за восстановлением:</p>
+
+<pre class="bash">
+watch -n 1 ceph -s
+</pre>
+
+<hr/>
+
+
+
+<h2>Этап 2: Настройка высокой доступности (HA) для ВМ</h2>
+
+<h3>2.1 Настройка HA для виртуальной машины</h3>
+
+<p>Создадим тестовую ВМ на RBD-хранилище (как в работе №1) и настроим для неё HA.</p>
+
+<p><strong>Через веб-интерфейс PVE:</strong></p>
+<ol>
+	<li>Создайте ВМ на хранилище <code>ceph-storage</code>.</li>
+	<li>Выберите ВМ в дереве.</li>
+	<li>Перейдите на вкладку <strong>HA</strong>.</li>
+	<li>Нажмите <strong>Add</strong>.</li>
+	<li>В поле <strong>VM</strong> выберите ID созданной ВМ.</li>
+	<li>Выберите политику <strong>&quot;migrate&quot;</strong> (или &quot;failover&quot;).</li>
+	<li>Оставьте <strong>&quot;Request State&quot;</strong> как &quot;started&quot;.</li>
+	<li>Нажмите <strong>Add</strong> или <strong>OK</strong>.</li>
+</ol>
+<p><strong>Через CLI:</strong></p>
+
+<pre class="bash">
+# Включение HA для ВМ (например, ID 101)
+ha-manager add 101
+
+# Просмотр статуса HA
+ha-manager status
+</pre>
+
+<p class="explanation"><strong>Пояснение:</strong> В Альт Виртуализации PVE используется стек HA
+на основе pacemaker+corosync для автоматической миграции ВМ при отказе узла.</p>
+
+<h3>2.2 Тестирование HA</h3>
+
+<p><strong>Запустим нагрузку на ВМ и смоделируем отказ узла.</strong></p>
+
+<p><strong>На ВМ (или на хосте PVE, где работает ВМ):</strong></p>
+
+<pre class="bash">
+# Подключаемся к консоли ВМ и запускаем длительную задачу
+ping 8.8.8.8 &gt; /dev/null &amp;
+</pre>
+
+<p><strong>На узле, где работает ВМ, отключаем сеть:</strong></p>
+
+<pre class="bash">
+# Имитируем отказ узла
+ip link set eth0 down
+# Или (осторожнее!)
+systemctl stop corosync
+</pre>
+
+<p><strong>Наблюдаем за поведением HA:</strong></p>
+
+<pre class="bash">
+# На другом узле мониторим HA
+watch -n 1 ha-manager status
+</pre>
+
+<p class="explanation"><strong>Вопрос:</strong> Что произошло с ВМ? На каком узле она
+перезапустилась? Сколько времени заняло восстановление?</p>
+
+<p class="explanation"><strong>Пояснение:</strong> При обнаружении отказа узла HA-менеджер
+перезапускает ВМ на другом узле. Это называется failover (отказоустойчивое переключение).</p>
+
+<h3>2.3 Восстановление и возврат ВМ</h3>
+
+<p><strong>Возвращаем сеть на отключённом узле и наблюдаем:</strong></p>
+
+<pre class="bash">
+ip link set eth0 up
+systemctl start corosync
+</pre>
+
+<p><strong>Проверяем, что кластер восстановил quorum:</strong></p>
+
+<pre class="bash">
+pvecm status
+</pre>
+
+<hr/>
+
+
+
+<h2>Этап 3: Горизонтальное масштабирование</h2>
+
+<h3>3.1 Добавление нового OSD</h3>
+
+<p>Имитируем добавление нового диска в один из узлов.</p>
+
+<pre class="bash">
+# На узле, где есть свободный диск (например, /dev/sdd)
+pveceph osd create /dev/sdd
+
+# Проверяем дерево OSD
+ceph osd tree
+</pre>
+
+<p class="explanation"><strong>Вопрос:</strong> Как изменилась ёмкость кластера? Как Ceph
+распределяет данные на новые OSD?</p>
+
+<h3>3.2 Добавление нового узла в кластер</h3>
+
+<p><strong>Подготовка четвёртого узла (PVE-04):</strong></p>
+<ol>
+	<li>Установите Альт Виртуализация PVE на четвёртую ВМ.</li>
+	<li>Настройте сеть (192.168.56.104).</li>
+	<li>Добавьте записи в /etc/hosts на всех узлах.</li>
+	<li>Добавьте узел в кластер Proxmox:</li>
+<pre class="bash">
+pvecm add 192.168.56.101
+</pre>
+	<li>Установите Ceph на новом узле:</li>
+<pre class="bash">
+pveceph install
+</pre>
+	<li>Добавьте монитор на новом узле:</li>
+<pre class="bash">
+pveceph mon create
+</pre>
+	<li>Добавьте OSD на новом узле (если есть диски):</li>
+<pre class="bash">
+pveceph osd create /dev/sdb
+</pre>
+</ol>
+
+<h3>3.3 Проверка расширенного кластера</h3>
+
+<pre class="bash">
+# Статус кластера Proxmox
+pvecm nodes
+
+# Статус Ceph
+ceph -s
+ceph osd tree
+ceph df
+</pre>
+
+<p class="explanation"><strong>Вопрос:</strong> Какие компоненты автоматически реплицируются при
+добавлении узла? Нужно ли вручную перераспределять данные?</p>
+
+<hr/>
+
+<h2>Этап 4: Настройка CephFS</h2>
+
+<h3>4.1 Создание MDS и пулов для CephFS</h3>
+
+<p>bash</p>
+<pre class="bash">
+# Создаём метаданные MDS (на любом узле)
+pveceph mds create
+
+# Создаём пул для метаданных
+ceph osd pool create cephfs_metadata 64
+
+# Создаём пул для данных
+ceph osd pool create cephfs_data 128
+
+# Создаём файловую систему
+ceph fs new cephfs cephfs_metadata cephfs_data
+</pre>
+
+<h3>4.2 Настройка доступа к CephFS</h3>
+
+<p><strong>Через веб-интерфейс PVE:</strong></p>
+<ol>
+	<li>Перейдите в <strong>Datacenter → Storage → Add → CephFS</strong>.</li>
+	<li><strong>ID:</strong> <code class="western">cephfs-storage</code></li>
+	<li><strong>MDS:</strong> выберите созданный MDS.</li>
+	<li><strong>Path:</strong> <code class="western">/</code> (корень)</li>
+	<li><strong>Content:</strong> выберите <code>Container</code>
+		и <code>VZDump backup file</code>.</li>
+</ol>
+
+<p><strong>Или через CLI:</strong></p>
+
+<pre class="bash">
+pvesm add cephfs cephfs-storage --mds pve-01 --path / --content container,vztmpl
+</pre>
+
+<h3>4.3 Проверка CephFS</h3>
+
+<pre class="bash">
+# Монтируем CephFS вручную для теста
+mount -t ceph 192.168.56.101:6789:/ /mnt -o name=admin,secret=$(ceph auth get-key client.admin)
+
+# Проверяем
+df -h /mnt
+ls -la /mnt
+</pre>
+
+<p class="explanation"><strong>Пояснение:</strong> CephFS — это POSIX-совместимая файловая система
+поверх Ceph, которая может использоваться для хранения контейнеров LXC и бэкапов.</p>
+
+<hr/>
+
+
+
+<h2>Этап 5: Бенчмаркинг производительности</h2>
+
+<h3>5.1 Базовое тестирование производительности Ceph RBD</h3>
+
+<pre class="bash">
+# Создаём тестовый образ
+rbd create test-bench --size 1024 --pool vm-storage
+
+# Бенчмарк
+rbd bench vm-storage/test-bench --io-type write --io-size 4096 --io-threads 16 --io-total 1G
+
+# Очистка
+rbd rm test-bench --pool vm-storage
+</pre>
+
+<h3>5.2 Сравнение с производительностью локального ZFS</h3>
+
+<pre class="bash">
+# Создаём тестовый файл на локальной ФС
+dd if=/dev/zero of=/tmp/test.bin bs=1M count=1024 conv=fdatasync
+</pre>
+
+<p class="explanation"><strong>Вопрос:</strong> Сравните производительность Ceph RBD и локального
+диска. Какие факторы влияют на производительность распределённого хранилища?</p>
+
+<hr/>
+
+
+
+<h2>Очистка</h2>
+
+<pre class="bash">
+# Удаляем тестовую ВМ
+qm stop 101
+qm destroy 101
+
+# Отключаем HA
+ha-manager remove 101
+
+# Удаляем CephFS (если создавали)
+ceph fs rm cephfs --yes-i-really-mean-it
+
+# Очистка бенчмарка
+rbd rm test-bench --pool vm-storage
+</pre>
+
+<hr/>
+
+
+
+<h2>Контрольные вопросы</h2>
+<ol>
+	<li>Сколько отказов OSD может пережить кластер Ceph при репликации 3?</li>
+	<li>Что происходит с данными при отказе OSD? Как Ceph восстанавливает реплики?</li>
+	<li>В чём разница между миграцией ВМ (live migration) и failover (HA)?</li>
+	<li>Как работает HA-менеджер в PVE? Какие компоненты обеспечивают его работу?</li>
+	<li>Как добавляется новый узел в существующий кластер Ceph?</li>
+	<li>Что такое CephFS и в каких сценариях она применяется?</li>
+	<li>Как проверить статус репликации данных в Ceph?</li>
+	<li>Какие параметры влияют на производительность RBD?</li>
+</ol>
+
+<hr/>
+
+
+
+<h2>Шпаргалка</h2>
+
+<table>
+	<thead>
+		<tr>
+			<th>Действие</th>
+			<th>Команда</th>
+		</tr>
+	</thead>
+	<tbody>
+		<tr>
+			<td>Статус кластера Proxmox</td>
+			<td>pvecm status</td>
+		</tr>
+		<tr>
+			<td>Узлы кластера</td>
+			<td>pvecm nodes</td>
+		</tr>
+		<tr>
+			<td>Статус Ceph</td>
+			<td>ceph -s</td>
+		</tr>
+		<tr>
+			<td>Дерево OSD</td>
+			<td>ceph osd tree</td>
+		</tr>
+		<tr>
+			<td>Состояние PG</td>
+			<td>ceph pg stat</td>
+		</tr>
+		<tr>
+			<td>Использование хранилища</td>
+			<td>ceph df</td>
+		</tr>
+		<tr>
+			<td>Миграция ВМ</td>
+			<td>qm migrate &lt;VMID&gt; &lt;target&gt; --online</td>
+		</tr>
+		<tr>
+			<td>HA-статус</td>
+			<td>ha-manager status</td>
+		</tr>
+		<tr>
+			<td>Добавить OSD</td>
+			<td>pveceph osd create /dev/sdX</td>
+		</tr>
+		<tr>
+			<td>Добавить монитор</td>
+			<td>pveceph mon create</td>
+		</tr>
+		<tr>
+			<td>Создать пул Ceph</td>
+			<td>ceph osd pool create &lt;name&gt; &lt;pg_num&gt;</td>
+		</tr>
+	</tbody>
+</table>
+
+<hr/>
+
+</body>
+</html>

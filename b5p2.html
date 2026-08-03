@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="ru-RU">
+
+  <head>
+    <title>SHD</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="shd.css">
+  </head>
+
+<body>
+
+<h1>Лабораторная работа №2: НастройкаNFS-сервера и клиента</h1>
+
+<p><strong>Тема:</strong> Развёртывание NFS-сервера на ALT Server, настройка
+экспорта каталогов, подключение с ALT Workstation, эксперименты с опциями монтирования
+и отработка сценариев отказоустойчивости.</p>
+
+<p><strong>Цель работы:</strong> Научиться настраивать NFS-сервер (версии 3 и 4),
+правильно экспортировать каталоги с различными опциями, монтировать их на клиенте, понимать
+разницу между режимами sync/async, hard/soft, а также отработать поведение при отказе сервера.</p>
+
+<p><strong>Топология:</strong></p>
+<ul>
+	<li><strong>Сервер:</strong> ALT Server 11 (виртуальная машина)</li>
+	<li><strong>Клиент:</strong> ALT Workstation 10.4 (хостовая система)</li>
+</ul>
+
+<hr/>
+
+
+
+<h2>Подготовка</h2>
+
+<div class="warning">
+<p><strong>Важно:</strong> Для выполнения команд с правами администратора
+мы будем использовать <code class="cmd">su -</code>.<br/>
+Переключитесь в режим root на обеих машинах.</p>
+</div>
+
+
+<p><strong>На сервере (ALT Server)</strong></p>
+
+<pre class="bash">
+su -
+</pre>
+
+<p><strong>На клиенте (ALT Workstation)</strong></p>
+
+<pre class="bash">
+su -
+</pre>
+
+<h3>1.1 Проверка сетевого взаимодействия</h3>
+
+<p>Прежде чем настраивать NFS, убедимся, что сервер и клиент видят друг друга.</p>
+
+<p><strong>На сервере:</strong></p>
+
+<pre class="bash">
+ip a
+</pre>
+
+<p>Запомните IP-адрес сервера (например, <code>192.168.122.206</code>).</p>
+
+<p><strong>На клиенте:</strong></p>
+
+<pre class="bash">
+ping -c 3 &lt;IP-адрес_сервера&gt;
+</pre>
+
+<h3> 1.2 Установка необходимых пакетов</h3>
+
+<p><strong>На сервере (ALT Server 11):</strong></p>
+<p>ALT Server 11 поставляется с Samba версии 4.21.9. Установим серверную часть:</p>
+
+<pre class="bash">
+apt-get update
+>apt-get install nfs-server rpcbind
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Пакет <code>nfs-server</code> содержит серверную
+часть NFS. <code>rpcbind</code> необходим для работы NFSv3 (преобразует RPC-вызовы
+в сетевые порты). Для NFSv4 rpcbind не обязателен, но мы будем использовать оба протокола.
+</div>
+
+<p><strong>На клиенте:</strong></p>
+
+<pre class="bash">
+apt-get install nfs-clients
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Пакет <code>nfs-clients</code> содержит утилиты для
+монтирования NFS-шар (<code class="cmd">mount.nfs</code>, <code class="cmd">showmount</code>)
+и инструменты для работы с блокировками (<code class="cmd">nfslock</code>).
+</div>
+
+<h3>1.3 Проверка установки</h3>
+
+<p><strong>На сервере:</strong></p>
+
+<pre class="bash">
+systemctl status nfs-server
+systemctl status rpcbind
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> В каком состоянии находятся сервисы? Если они не активны,
+как их запустить?</p>
+
+<p><strong>Пояснение:</strong> Сервисы должны быть активны. Если нет, запустите
+<code class="cmd">systemctl enable --now nfs-server rpcbind</code>.</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 2: Создание каталогов для экспорта</h2>
+
+<h3>2.1 Создание тестовых каталогов на сервере</h3>
+
+<p><strong>На сервере:</strong></p>
+
+<p>Создаём каталоги с разными сценариями использования</p>
+
+<pre class="bash">
+mkdir -p /srv/nfs/{public,private,upload,backup}
+</pre>
+
+<p>Создаём тестовые файлы</p>
+
+<pre class="bash">
+echo &quot;Public file from server&quot; &gt; /srv/nfs/public/readme.txt
+echo &quot;Secret data&quot; &gt; /srv/nfs/private/secret.txt
+echo &quot;Upload area ready&quot; &gt; /srv/nfs/upload/welcome.txt
+</pre>
+
+<p>Устанавливаем права для теста upload-каталога (доступ на запись всем)</p>
+
+<pre class="bash">
+chmod 777 /srv/nfs/upload
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Почему для каталога upload установлены права 777?
+В каких случаях это оправдано?</p>
+
+<p><strong>Пояснение:</strong> Каталог upload будет использоваться для проверки
+возможности записи на NFS-шару. Права 777 — это упрощение для лабораторной работы.
+В реальной жизни лучше использовать группы и более тонкую настройку прав.</p>
+</div>
+
+<h3>2.2 Создание структуры для NFSv4</h3>
+
+<p>NFSv4 рекомендует экспортировать все каталоги внутри одного корневого каталога (например,
+<code>/exports</code>) с помощью <code class="cmd">mount --bind</code>. Это
+повышает безопасность и упрощает конфигурацию.</p>
+
+<p>Создаём корневой каталог для NFSv4</p>
+
+<pre class="bash">
+mkdir -p /exports/{public,private,upload,backup}
+</pre>
+
+<p>Привязываем наши каталоги внутрь /exports</p>
+
+<pre class="bash">
+mount --bind /srv/nfs/public /exports/public
+mount --bind /srv/nfs/private /exports/private
+mount --bind /srv/nfs/upload /exports/upload
+mount --bind /srv/nfs/backup /exports/backup
+</pre>
+
+<p>Проверяем</p>
+
+<pre class="bash">
+ls -la /exports/
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Что делает команда <code class="cmd">mount --bind</code>?
+Чем она отличается от символической ссылки?</p>
+
+<p><strong>Пояснение:</strong> <code class="cmd">mount --bind</code>
+делает каталог доступным в другом месте файловой системы. В отличие от симлинка,
+он работает на уровне ядра и &quot;невидим&quot; для некоторых приложений, что важно для
+chroot-окружений и NFSv4.</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 3: Настройка экспорта (NFSv3 и NFSv4)</h2>
+
+<h3>3.1 Редактирование /etc/exports</h3>
+<p><strong>На сервере:</strong></p>
+
+<pre class="bash">
+cat &gt; /etc/exports &lt;&lt; 'EOF'
+
+# Экспорт для NFSv3 и NFSv4
+# Корневой каталог для NFSv4 (должен иметь fsid=0)
+/exports        &lt;IP-клиента&gt;(rw,sync,no_subtree_check,fsid=0,crossmnt)
+
+# Детальные настройки для конкретных каталогов
+/exports/public  &lt;IP-клиента&gt;(ro,sync,no_subtree_check)
+/exports/private &lt;IP-клиента&gt;(rw,sync,no_subtree_check,root_squash)
+/exports/upload  &lt;IP-клиента&gt;(rw,async,no_subtree_check,all_squash,anonuid=1000,anongid=1000)
+/exports/backup  &lt;IP-клиента&gt;(rw,sync,no_wdelay,no_subtree_check)
+EOF
+</pre>
+
+<div class="warning">
+<strong>Важно:</strong> Замените <code>&lt;IP-клиента&gt;</code> на реальный IP-адрес ALT Workstation (или используйте <code>*</code> для доступа со всех адресов в лабораторной среде).
+</div>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Проанализируйте каждую строку. Что означают опции
+<code>ro</code>, <code>rw</code>, <code>sync</code>, <code>async</code>,
+<code>root_squash</code>, <code>all_squash</code>, <code>no_subtree_check</code>,
+<code>fsid=0</code>, <code>crossmnt</code>?</p>
+
+<p><strong>Пояснение:</strong></p>
+<ul>
+	<li><code>ro</code> / <code>rw</code> — разрешение на чтение или чтение и запись.</li>
+	<li><code>sync</code> / <code>async</code> — синхронная или асинхронная запись.
+		<code>async</code> быстрее, но при сбое можно потерять данные.</li>
+	<li><code>root_squash</code> — при обращении пользователя root с клиента его права
+		понижаются до анонимных (обычно nobody).</li>
+	<li><code>all_squash</code> — все пользователи с клиента отображаются на анонимного.</li>
+	<li><code>anonuid/anongid</code> — явное указание UID/GID для анонимного пользователя.</li>
+	<li><code>no_subtree_check</code> — отключает проверку, находится ли запрошенный
+		файл в экспортируемом подкаталоге (повышает производительность).</li>
+	<li><code>fsid=0</code> — указывает, что этот каталог является корневым для NFSv4.</li>
+	<li><code>crossmnt</code> — позволяет клиенту &quot;видеть&quot; точки монтирования
+		внутри экспортируемого каталога.</li>
+</ul>
+</div>
+
+<h3>3.2 Применение конфигурации</h3>
+
+<p>Проверяем синтаксис</p>
+
+<pre class="bash">
+exportfs -v
+</pre>
+
+<p>Применяем изменения</p>
+
+<pre class="bash">
+exportfs -ra
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Команда <code class="cmd">exportfs -r</code>
+перечитывает <code>/etc/exports</code> и применяет изменения без перезапуска
+сервера. Ключ <code>-a</code> означает &quot;все экспорты&quot;.
+</div>
+
+<h3>3.3 Настройка rpcbind для NFSv3 (если нужно)</h3>
+
+<p>Если планируется использовать NFSv3, убедитесь, что <code class="cmd">rpcbind</code>
+слушает сетевые интерфейсы:</p>
+
+<p>Проверяем настройки rpcbind</p>
+
+<pre class="bash">
+cat /etc/sysconfig/rpcbind
+</pre>
+
+<p>Если строка <code>CONTROL_ARGS=&quot;-l&quot; </code>не закомментирована — закомментируйте её
+(это ограничивает работу <code>rpcbind</code> только <code>loopback</code>-интерфейсом)</p>
+
+<div class="explanation">
+<strong>Пояснение:</strong> В ALT Linux по умолчанию <code>rpcbind</code>
+может быть ограничен локальным интерфейсом из соображений безопасности. Для работы
+NFSv3 по сети эту опцию нужно отключить.
+</div>
+
+<p>Если вносили изменения, перезапустите <code class="cmd">rpcbind</code> и
+<code class="cmd">nfs-server</code></p>
+
+<pre class="bash">
+systemctl restart rpcbind nfs-server
+</pre>
+
+<h3>3.4 Просмотр экспортированных ресурсов</h3>
+
+<p>Просмотр экспортов с сервера</p>
+
+<pre class="bash">
+exportfs -v
+</pre>
+
+<p>Просмотр с клиента (позже выполните на клиенте)</p>
+
+<pre class="bash">
+showmount -e &lt;IP-сервера&gt;
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Виден ли на клиенте каталог <code>/exports</code>
+или только его подкаталоги?</p>
+<p><strong>Пояснение:</strong> При использовании NFSv4 с <code>fsid=0</code> клиент
+видит и может смонтировать только корневой каталог <code>/exports</code>,
+а все подкаталоги будут доступны внутри него. При NFSv3 каждый каталог экспортируется
+отдельно.</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 4: Монтирование NFS на клиенте</h2>
+
+<h3>4.1 Монтирование NFSv4</h3>
+
+<pre class="bash">
+mkdir /mnt/nfs
+</pre>
+
+<p>Монтируем корень NFSv4 (все каталоги внутри)</p>
+
+<pre class="bash">
+mount -t nfs4 -o rw,hard,intr,timeo=300,retrans=3 &lt;IP-сервера&gt;:/ /mnt/nfs
+</pre>
+
+<p>Проверяем</p>
+
+<pre class="bash">
+ls -la /mnt/nfs/
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> При монтировании NFSv4 мы указываем сервер и
+корневой каталог (<code>:</code>), а все субэкспорты становятся доступны как подкаталоги.
+Опции <code>hard,intr</code> означают, что при потере сервера процесс будет ждать, но его
+можно прервать по Ctrl+C .
+</div>
+
+<div class="explanation">
+<strong>Вопрос:</strong> Что вы видите в <code>/mnt/nfs/</code>? Какие каталоги
+там присутствуют?
+</div>
+
+<p>Отмонтируем корень NFSv4</p>
+
+<pre class="bash">
+umount /mnt/nfs
+</pre>
+
+<h3> 4.2 Создание точек монтирования на клиенте</h3>
+
+<p><strong>На клиенте (ALT Workstation):</strong></p>
+
+<pre class="bash">
+mkdir -p /mnt/nfs/{public,private,upload,backup}
+</pre>
+
+<h3> 4.3 Монтирование отдельных каталогов (NFSv3-стиль)</h3>
+
+<p>Без демона rpc-statd потребуется опция nolock при монтировании</p>
+
+<pre class="bash">
+systemctl start rpc-statd
+</pre>
+
+<p>Монтируем public (только чтение)</p>
+
+<pre class="bash">
+mount -t nfs -o vers=3,ro,hard,intr &lt;IP-сервера&gt;:/exports/public /mnt/nfs/public
+</pre>
+
+<p>Монтируем private (чтение-запись)</p>
+
+<pre class="bash">
+mount -t nfs -o vers=3,rw,hard,intr &lt;IP-сервера&gt;:/exports/private /mnt/nfs/private
+</pre>
+
+<p>Монтируем upload (для теста записи)</p>
+
+<pre class="bash">
+mount -t nfs -o vers=3,rw,hard,intr &lt;IP-сервера&gt;:/exports/upload /mnt/nfs/upload
+</pre>
+
+<p>Монтируем backup (с увеличенными таймаутами)</p>
+
+<pre class="bash">
+mount -t nfs -o vers=3,rw,hard,intr,timeo=600,retrans=5 &lt;IP-сервера&gt;:/exports/backup /mnt/nfs/backup
+</pre>
+
+<div class="explanation">
+<p><strong>Пояснение:</strong> При использовании NFSv3 мы монтируем каждый каталог отдельно,
+указывая полный путь на сервере. Версию протокола явно задаём через <code>vers=3</code>.
+</div>
+
+<h3>4.4 Проверка монтирования</h3>
+
+<pre class="bash">
+df -h | grep nfs
+</pre>
+
+<pre class="bash">
+mount | grep nfs
+</pre>
+
+<div class="explanation">
+Обратите внимание на строку монтирования? Какие опции используются по умолчанию?
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 5: Тестирование доступа и опций</h2>
+
+<h3>5.1 Проверка режимов доступа</h3>
+
+<p><strong>На клиенте:</strong></p>
+
+<p>Проверка public (ro — только чтение)</p>
+
+<pre class="bash">
+cat /mnt/nfs/public/readme.txt<
+echo &quot;test&quot; &gt; /mnt/nfs/public/test.txt
+</pre>
+
+<div class="explanation">
+<strong>Вопрос:</strong> Удалась ли запись? Почему?
+</div>
+
+<p>Проверка private (rw, но root_squash)</p>
+
+<pre class="bash">
+cat /mnt/nfs/private/secret.txt
+echo &quot;test by root&quot; &gt; /mnt/nfs/private/test.txt
+</pre>
+
+<div class="explanation">
+&quot;Отказано в доступе&quot; ?
+</div>
+
+<p>Поравим права на сервере</p>
+
+<pre class="bash">
+chown root:nobody /exports/private
+chmod 775 /exports/private
+</pre>
+
+<p>И повторим тест на клиенте</p>
+
+<pre class="bash">
+echo &quot;test by root&quot; &gt; /mnt/nfs/private/test.txt
+</pre>
+
+<p>Проверка прав на записанный файл</p>
+
+<pre class="bash">
+ls -la /mnt/nfs/private/test.txt
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Кто является владельцем созданного файла? Почему не root?</p>
+
+<p><strong>Пояснение:</strong> Опция <code>root_squash</code> (включена по умолчанию)
+отображает пользователя root с клиента на анонимного пользователя (обычно nobody/nogroup или
+nobody/nogroup) на сервере. Это критически важно для безопасности.</p>
+</div>
+
+<p>Проверка upload (all_squash + anonuid/anongid)</p>
+
+<pre class="bash">
+echo &quot;upload test&quot; &gt; /mnt/nfs/upload/upload.txt
+ls -la /mnt/nfs/upload/
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Кто является владельцем <code>upload.txt</code>?
+Какому реальному пользователю на сервере соответствует UID 1000?</p>
+
+<p><strong>Пояснение:</strong> <code>all_squash</code> отображает
+<strong>всех</strong> пользователей с клиента на анонимного.
+<code>anonuid=1000,anongid=1000</code> задаёт конкретного пользователя на сервере
+(обычно первого обычного пользователя). Это удобно для upload-каталогов, куда могут
+писать все, но права на записанные файлы ограничены.</p>
+</div>
+
+<h3>5.2 Тестирование async/sync</h3>
+
+<p><strong>На сервере</strong> в другом терминале можно наблюдать за операциями
+ввода-вывода:</p>
+
+<p>Установите пакет iotop для мониторинга (на сервере)</p>
+
+<pre class="bash">
+apt-get install iotop
+iotop
+</pre>
+
+<p><strong>На клиенте</strong> выполните запись большого файла в каталоги с
+разными режимами.</p>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Как вы думаете, в каком режиме запись будет завершаться
+быстрее? Какой режим безопаснее при сбое питания сервера?</p>
+
+<p><strong>Пояснение:</strong> <code>async</code>
+(как в каталоге upload) позволяет серверу подтвердить запись до того, как данные
+реально попали на диск. Это быстрее, но при внезапном отключении питания данные
+могут быть потеряны. <code>sync</code> гарантирует, что данные записаны на
+диск перед подтверждением — медленнее, но надёжнее.</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 6: Поведение при отказе сервера</h2>
+
+<h3>6.1 Тестирование hard/soft-монтирования</h3>
+
+<p>Создадим временное монтирование с разными опциями и сымитируем отказ сервера.</p>
+
+<p><strong>На клиенте:</strong></p>
+
+<p>Создаём тестовые точки монтирования</p>
+
+<pre class="bash">
+mkdir -p /mnt/test/hard
+mkdir -p /mnt/test/soft
+</pre>
+
+<p>Монтируем с hard-опциями</p>
+
+<pre class="bash">
+mount -t nfs -o vers=3,hard,intr,timeo=5 &lt;IP-сервера&gt;:/exports/public /mnt/test/hard
+</pre>
+
+<p>Монтируем с soft-опциями</p>
+
+<pre class="bash">
+mount -t nfs -o vers=3,soft,timeo=5,retrans=2 &lt;IP-сервера&gt;:/exports/public /mnt/test/soft
+</pre>
+
+<h3> 6.2 Симуляция отказа</h3>
+
+<p><strong>На сервере</strong> (остановим NFS):</p>
+
+<pre class="bash">
+systemctl stop nfs-server
+</pre>
+
+
+<p><strong>На клиенте</strong> попробуйте обратиться к смонтированным каталогам):</p>
+
+<p>Попытка чтения с hard-монтирования</p>
+  
+<pre class="bash">
+ls -la /mnt/test/hard/
+</pre>
+
+<p>В другом терминале попробуйте</p>
+
+<pre class="bash">
+ls -la /mnt/test/soft/
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Как ведёт себя система в каждом случае? Можно ли
+прервать команду Ctrl+C?</p>
+
+<p><strong>Пояснение:</strong></p>
+<ul>
+	<li><strong>hard-монтирование:</strong> Процесс &quot;зависает&quot;
+		в ожидании сервера.  Если задана опция <code>intr</code>, команду
+		можно прервать Ctrl+C.</li>
+	<li><strong>soft-монтирование:</strong> Команда завершается с ошибкой
+		I/O после истечения таймаута и повторных попыток.</li>
+</ul>
+</div>
+
+<h3>6.3 Восстановление сервера</h3>
+
+<p><strong>На сервере:</strong></p>
+
+<pre class="bash">
+systemctl start nfs-server
+exportfs -ra
+</pre>
+
+<p><strong>На клиенте:</strong></p>
+<p>Проверяем hard-монтирование (должно заработать автоматически)</p>
+
+<pre class="bash">
+ls -la /mnt/test/hard/
+</pre>
+
+<div class="explanation">
+<strong>Вопрос:</strong> Потребовалось ли перемонтировать hard-шару после восстановления сервера? Почему?
+</div>
+
+<h3>6.4 Очистка тестовых монтирований</h3>
+
+<pre class="bash">
+umount /mnt/test/hard
+umount /mnt/test/soft
+</pre>
+
+<hr/>
+
+
+
+<h2>Этап 8: Очистка</h2>
+
+<p><strong>На клиенте:</strong></p>
+
+<p>Размонтируем всё</p>
+
+<pre class="bash">
+umount /mnt/nfs/public
+umount /mnt/nfs/private
+umount /mnt/nfs/upload
+umount /mnt/nfs/backup
+umount /mnt/nfs
+</pre>
+
+<p><strong>На сервере:</strong></p>
+
+<p>Останавливаем NFS (по желанию)</p>
+
+<pre class="bash">
+systemctl stop nfs-server
+</pre>
+
+<p>Очищаем /etc/exports (закомментируйте или удалите строки)</p>
+
+<hr/>
+
+
+
+<h2>Контрольные вопросы</h2>
+
+<ol>
+	<li>В чём разница между NFSv3 и NFSv4 с точки зрения настройки экспорта и монтирования?</li>
+	<li>Что произойдёт, если на сервере не отключена опция
+		<code>CONTROL_ARGS=&quot;-l&quot;</code> в
+		<code>/etc/sysconfig/rpcbind</code>?</li>
+	<li>Зачем нужна опция <code>fsid=0</code> при экспорте для NFSv4?</li>
+	<li>В чём отличие <code>root_squash</code> от <code>all_squash</code>?</li>
+	<li>Какой режим записи (<code>sync</code> или <code>async</code>) безопаснее?
+		Какой быстрее?</li>
+	<li>Когда следует использовать <code>soft</code>-монтирование, а когда
+		<code>hard</code>?</li>
+	<li>Что делает опция <code>no_subtree_check</code> и почему её часто рекомендуют
+		включать?</li>
+	<li>Как проверить список экспортированных ресурсов с клиента?</li>
+	<li>Почему при монтировании NFSv4 указывается <code>:/</code>, а не
+		<code>:/exports</code>?</li>
+	<li>Как восстановить доступ к hard-монтированию после временного отказа сервера?</li>
+</ol>
+
+<hr/>
+
+
+
+<h2>Выводы</h2>
+
+<ul>
+	<li>NFS — мощный протокол для организации сетевого доступа к файлам в среде Linux.</li>
+	<li>ALT Linux предоставляет полную поддержку NFSv3 и NFSv4 через пакеты
+		<code>nfs-server</code> и <code>nfs-clients</code>.</li>
+	<li>Ключевые опции экспорта: <code>rw/ro</code>, <code>sync/async</code>,
+		<code>root_squash/all_squash</code>, <code>no_subtree_check</code>.</li>
+	<li>Опции монтирования <code>hard/soft/intr</code> определяют поведение клиента
+		при отказе сервера.</li>
+	<li>Для NFSv4 рекомендуется использовать bind-монтирование и единый корневой
+		каталог с <code>fsid=0</code>.</li>
+	<li>Правильная настройка squashing-опций критична для безопасности в
+		многопользовательской среде.</li>
+</ul>
+
+<hr/>
+
+</body>
+</html>

@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="ru-RU">
+
+  <head>
+    <title>SHD</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="shd.css">
+  </head>
+
+<body>
+
+<h1>Лабораторная работа №1: Развёртывание кластера Proxmox VE</h1>
+
+<p><strong>Цель работы:</strong> Установить и настроить кластер Proxmox VE из трёх узлов,
+интегрировать распределённое хранилище Ceph RBD как общее хранилище для виртуальных машин.</p>
+
+<hr/>
+
+
+
+<h2>Подготовка</h2>
+
+<h3>1.1 Создание клонов и донастройка после клонирования</h3>
+
+<p>У нас есть базовая ВМ с установленной "Альт Виртуализация редакция PVE 11.0". Из этой ВМ создадим еще два клона.</p>
+
+<strong>На каждом клоне (PVE-02, PVE-03) после клонирования выполняем:</strong>
+
+<pre class="bash">
+su -
+</pre>
+
+<strong>Шаг 1: Удаление и генерация нового machine-id</strong>
+
+
+<pre class="bash">
+rm -f /etc/machine-id; systemd-machine-id-setup
+</pre>
+
+<p class="explanation"><strong>Пояснение:</strong> <code>machine-id</code> — это уникальный
+идентификатор системы, используемый systemd, D-Bus и некоторыми сетевыми сервисами. При
+клонировании ВМ все копии получают одинаковый ID, что может вызвать конфликты (особенно в кластере
+и при работе DHCP). Удаление и генерация нового ID решает эту проблему.</p>
+
+<strong>Шаг 2: Изменение имени хоста</strong>
+
+<pre class="bash">
+# Устанавливаем новое имя хоста
+# Для PVE-02:
+hostnamectl set-hostname pve-02
+
+# Для PVE-03:
+hostnamectl set-hostname pve-03
+
+# Проверяем
+hostnamectl
+</pre>
+
+<p class="explanation"><strong>Пояснение:</strong> Имя хоста должно быть уникальным в пределах
+кластера. В противном случае Proxmox не сможет корректно сформировать кластер.</p>
+
+<h3>1.2 Настройка сети на каждом узле PVE</h3>
+
+<p><strong>Особенность ALT Виртуализация 11:</strong> Для настройки сети используется файл
+<code>/etc/network/interfaces</code> (в стиле Debian), а не традиционная для ALT Linux система
+<code>/etc/net/ifaces/</code>.</p>
+
+<p><strong>На каждом узле (PVE-01, PVE-02, PVE-03) выполняем:</strong></p>
+
+<pre class="bash">
+su -
+</pre>
+
+<p><strong>Редактируем конфигурацию сети:</strong></p>
+
+<pre class="bash">
+nano /etc/network/interfaces
+</pre>
+
+<p>Приводим файл к следующему виду (для каждого узла — свой IP):</p>
+
+<p><strong>Для PVE-01:</strong></p>
+
+<pre class="text">
+auto lo
+iface lo inet loopback
+
+iface enp1s0 inet manual
+
+auto vmbr0
+iface vmbr0 inet static
+    address 192.168.56.101/24
+    gateway 192.168.56.1
+    bridge-ports enp1s0
+    bridge-stp off
+    bridge-fd 0
+    dns-nameservers 192.168.56.1
+</pre>
+
+<p><strong>Для PVE-02:</strong></p>
+
+<pre class="text">
+auto lo
+iface lo inet loopback
+
+iface enp1s0 inet manual
+
+auto vmbr0
+iface vmbr0 inet static
+    address 192.168.56.102/24
+    gateway 192.168.56.1
+    bridge-ports enp1s0
+    bridge-stp off
+    bridge-fd 0
+    dns-nameservers 192.168.56.1
+</pre>
+
+<p><strong>Для PVE-03:</strong></p>
+
+<pre class="text">
+auto lo
+iface lo inet loopback
+
+iface enp1s0 inet manual
+
+auto vmbr0
+iface vmbr0 inet static
+    address 192.168.56.103/24
+    gateway 192.168.56.1
+    bridge-ports enp1s0
+    bridge-stp off
+    bridge-fd 0
+    dns-nameservers 192.168.56.1
+</pre>
+
+<p>И переинициализирем сеть</p>
+
+<pre class="bash">
+systemctl restart ifupdown2-pre.service
+</pre>
+
+<p class="explanation"><strong>Пояснение:</strong> В ALT Виртуализация 11 используется стандартный
+для Proxmox способ настройки сети через /etc/network/interfaces. Это обеспечивает совместимость со
+скриптами PVE и SDN (Software-Defined Networking).</p>
+
+<h3>1.3 Настройка файла hosts</h3>
+
+<p><strong>На каждом узле добавляем резолвинг всех трёх хостов:</strong></p>
+
+<pre class="bash">
+cat &gt;&gt; /etc/hosts &lt;&lt; EOF
+192.168.56.101 pve-01 pve-01.local
+192.168.56.102 pve-02 pve-02.local
+192.168.56.103 pve-03 pve-03.local
+EOF
+</pre>
+
+<p class="explanation"><strong>Пояснение:</strong> Резолвинг по именам критически важен для
+работы кластера Proxmox и Ceph.</p>
+
+<h3>1.4 Проверка установки Proxmox VE</h3>
+
+<p>Убеждаемся, что Proxmox VE установлен и веб-интерфейс доступен:</p>
+
+<pre class="bash">
+systemctl status pveproxy
+systemctl status pvedaemon
+</pre>
+
+<p class="explanation"><strong>Ожидаемый результат:</strong> Оба сервиса активны (running).</p>
+
+<pre class="bash">
+# Проверяем версию PVE
+pveversion -v
+</pre>
+
+<h3>1.5 Подготовка дисков для Ceph</h3>
+
+<p><strong>На каждом узле добавляем дополнительные диски для Ceph OSD:</strong></p>
+
+<pre class="bash">
+# Просматриваем доступные диски
+lsblk
+
+# Для лабораторной работы используем дополнительные виртуальные диски
+# Например, /dev/sdb и /dev/sdc
+
+# Проверяем, что диски не смонтированы и не содержат данных
+fdisk -l /dev/sdb
+</pre>
+
+<p class="explanation"><strong>Пояснение:</strong> Для Ceph OSD нужны отдельные диски или
+разделы, не занятые системой.</p>
+
+<hr/>
+
+
+
+<h2>Этап 1: Создание кластера Proxmox</h2>
+
+<h3>1.1 Инициализация кластера на первом узле</h3>
+
+<p><strong>На PVE-01:</strong></p>
+
+<pre class="bash">
+# Создаём кластер с именем &quot;lab-cluster&quot;
+pvecm create lab-cluster
+
+# Проверяем статус
+pvecm status
+</pre>
+
+<p><strong>Ожидаемый результат:</strong> Узел PVE-01 является единственным членом кластера,
+quorum = 1.</p>
+
+<h3>1.2 Присоединение остальных узлов</h3>
+
+<p><strong>На PVE-02 и PVE-03:</strong></p>
+
+<pre class="bash">
+# Присоединяемся к кластеру
+pvecm add 192.168.56.101
+</pre>
+
+<p><strong>На PVE-01 (проверяем):</strong></p>
+
+<pre class="bash">
+pvecm nodes
+</pre>
+
+<p><strong>Ожидаемый результат:</strong> Все три узла отображаются в списке, quorum = 3.</p>
+
+<p class="explanation"><strong>Вопрос к студентам:</strong> Что такое quorum и почему он важен для
+работы кластера высокой доступности?</p>
+
+<hr/>
+
+
+
+<h2>Этап 2: Установка и настройка Ceph</h2>
+
+<h3>2.1 Запускаем необходимые службы Ceph</h3>
+
+<p><strong>На каждом узле:</strong></p>
+
+<pre class="bash">
+systemctl enable --now \
+    ceph-mon.target \
+    ceph-mgr.target 
+    ceph-osd.target \
+    ceph-mds.target \
+    ceph-radosgw.target
+</pre>
+
+<p class="explanation"><strong>Пояснение:</strong> В ALT Виртуализации эти
+службы по умолчанию как правило выключены.</p>
+
+
+<h3>2.2 Инициализация Ceph-кластера</h3>
+
+<p><strong>На PVE-01:</strong></p>
+
+<pre class="bash">
+# Инициализация Ceph с указанием сети для публичного трафика
+pveceph init --network 192.168.56.0/24
+
+# Создание мониторов
+pveceph mon create
+
+# Создание менеджера
+pveceph mgr create
+</pre>
+
+<p class="explanation"><strong>Пояснение:</strong> Мониторы (MON) обеспечивают консенсус в
+кластере, менеджер (MGR) собирает метрики и предоставляет API.</p>
+
+<p><strong>На PVE-02 и PVE-03:</strong></p>
+
+<pre class="bash">
+# Добавляем мониторы на каждом узле
+pveceph mon create
+</pre>
+
+<h3> 2.3 Добавление OSD (Object Storage Daemons)</h3>
+
+<p><strong>На каждом узле (для каждого дополнительного диска):</strong></p>
+
+<pre class="bash">
+# Просматриваем доступные диски
+lsblk
+
+# Добавляем OSD на диске /dev/sdb
+pveceph osd create /dev/sdb
+
+# Если есть второй диск
+pveceph osd create /dev/sdc
+</pre>
+
+<p class="explanation"><strong>Пояснение:</strong> OSD — это демон, который хранит данные,
+обрабатывает репликацию, восстановление и перебалансировку. Для обеспечения отказоустойчивости
+требуется как минимум 3 OSD.</p>
+
+<h3>2.4 Создание пула Ceph</h3>
+
+<p><strong>На PVE-01:</strong></p>
+
+<pre class="bash">
+# Создаём пул для виртуальных машин
+ceph osd pool create vm-storage 128
+
+# Проверяем создание пула
+ceph osd lspools
+
+# Статус кластера Ceph
+ceph -s
+</pre>
+
+<p class="explanation"><strong>Пояснение:</strong> Пул — это логическая группа объектов в Ceph.
+Количество placement groups (PG) должно быть кратно числу OSD.</p>
+
+<hr/>
+
+<h2>Этап 3: Интеграция Ceph RBD в PVE</h2>
+
+<h3>3.1 Добавление RBD-хранилища в PVE</h3>
+
+<p><strong>На PVE-01 (в веб-интерфейсе или CLI):</strong></p>
+
+<pre class="bash">
+# Добавляем хранилище RBD
+pvesm add rbd ceph-storage \
+    --pool vm-storage \
+    --content images,rootdir
+</pre>
+
+<p class="explanation"><strong>Пояснение:</strong> RBD (RADOS Block Device) — это блочное
+устройство поверх Ceph, которое может использоваться как хранилище для виртуальных машин.</p>
+
+<h3>3.2 Проверка хранилища</h3>
+
+<pre class="bash">
+# Просмотр всех хранилищ
+pvesm status
+
+# Детальная информация о хранилище
+pvesm status --storage ceph-storage
+</pre>
+
+<hr/>
+
+<h2>Этап 4: Создание и миграция виртуальной машины</h2>
+
+<h3>4.1 Создание виртуальной машины на RBD-хранилище</h3>
+
+<p><strong>Через веб-интерфейс (<a href="https://192.168.56.101:8006/"
+target="_blank">https://192.168.56.101:8006</a>):</strong></p>
+<ol>
+	<li>Войдите в веб-интерфейс PVE (логин: root, пароль: установленный при установке).</li>
+	<li>Нажмите &quot;Create VM&quot; в правом верхнем углу.</li>
+	<li><strong>General:</strong> ID = 100, Name = &quot;test-vm&quot;.</li>
+	<li><strong>OS:</strong> Выберите ISO-образ (можно загрузить через хранилище
+		&quot;local&quot;).</li>
+	<li><strong>System:</strong> Оставьте по умолчанию.</li>
+	<li><strong>Hard Disk:</strong> Bus/Device = SCSI, Storage = <code>ceph-storage</code>
+		(RBD), Size = 10 GB.</li>
+	<li><strong>CPU:</strong> 1 socket, 2 cores.</li>
+	<li><strong>Memory:</strong> 2048 MB.</li>
+	<li><strong>Network:</strong> Bridge = vmbr0, Model = VirtIO.</li>
+	<li>Завершите создание.</li>
+</ol>
+
+<h3>4.2 Установка гостевой ОС</h3>
+
+<p>Запустите ВМ и выполните установку базовой ОС (например, Альт Рабочая станция).</p>
+
+<h3>4.3 Живая миграция ВМ между узлами</h3>
+
+<p><strong>Через веб-интерфейс:</strong></p>
+<ol>
+	<li>Выберите ВМ (ID 100) в дереве слева.</li>
+	<li>Нажмите &quot;Migrate&quot; в верхней панели.</li>
+	<li>Выберите целевой узел (например, pve-02).</li>
+	<li>Установите флажок &quot;Online&quot; (живая миграция).</li>
+	<li>Нажмите &quot;Migrate&quot;.</li>
+</ol>
+
+<p><strong>Через CLI:</strong></p>
+
+<pre class="bash">
+qm migrate 100 pve-02 --online
+</pre>
+
+<p class="explanation"><strong>Вопрос:</strong> Сколько времени заняла миграция? Почему при использовании Ceph миграция практически мгновенна?</p>
+
+<h3>4.4 Проверка после миграции</h3>
+
+<pre class="bash">
+# Проверяем, на каком узле теперь работает ВМ
+qm status 100
+
+# Проверяем местоположение диска (должен быть в Ceph, а не на локальном хранилище)
+qm config 100 | grep scsi0
+</pre>
+
+<p class="explanation"><strong>Пояснение:</strong> При использовании общего хранилища (Ceph RBD)
+при миграции передаётся только состояние RAM, а не диск. Это делает миграцию очень быстрой — менее
+3 секунд для тестовой ВМ.</p>
+
+<hr/>
+
+
+
+<h2>Этап 5: Мониторинг и диагностика</h2>
+
+<h3>5.1 Мониторинг через веб-интерфейс</h3>
+
+<p>Откройте вкладку <strong>Ceph</strong> в левом меню PVE. Здесь доступны:</p>
+<ul>
+	<li><strong>Status:</strong> Общее состояние кластера, версия, количество OSD.</li>
+	<li><strong>Monitor:</strong> Статус мониторов.</li>
+	<li><strong>Manager:</strong> Статус менеджеров.</li>
+	<li><strong>OSD:</strong> Список OSD, их заполненность, состояние.</li>
+	<li><strong>Pool:</strong> Информация о пулах (размер репликации, PG).</li>
+	<li><strong>Configuration:</strong> Файлы конфигурации Ceph.</li>
+</ul>
+
+<h3>5.2 Мониторинг через CLI</h3>
+
+<pre class="bash">
+# Общее состояние кластера
+ceph -s
+
+# Состояние OSD
+ceph osd tree
+
+# Состояние пулов
+ceph osd pool ls detail
+
+# Использование хранилища
+ceph df
+</pre>
+
+<p class="explanation"><strong>Вопрос:</strong> Что означает состояние HEALTH_WARN? Какие
+предупреждения могут возникать в только что созданном кластере?</p>
+
+<hr/>
+
+
+
+<h2>Очистка</h2>
+
+<pre class="bash">
+# Останавливаем тестовую ВМ
+qm stop 100
+
+# Удаляем ВМ
+qm destroy 100
+</pre>
+
+<hr/>
+
+<h2>Контрольные вопросы</h2>
+<ol>
+	<li>Какие компоненты Ceph входят в состав Альт Виртуализация редакция PVE?</li>
+	<li>Сколько узлов требуется для отказоустойчивого кластера Proxmox и Ceph? Почему?</li>
+	<li>Что такое quorum в контексте кластера высокой доступности?</li>
+	<li>Какую роль выполняют MON, MGR и OSD в Ceph?</li>
+	<li>Почему миграция ВМ между узлами при использовании RBD происходит быстрее, чем при
+		использовании локального хранилища?</li>
+	<li>Что такое placement group (PG) и как выбрать их количество?</li>
+	<li>Как проверить, что диск ВМ действительно хранится в Ceph, а не локально?</li>
+</ol>
+
+<hr/>
+
+</body>
+</html>

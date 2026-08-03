@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="ru-RU">
+
+  <head>
+    <title>SHD</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="shd.css">
+  </head>
+
+<body>
+
+<h1>Лабораторная работа 1: Разметка дисков.</h1>
+
+<div class="warning">
+<strong>Важно:</strong> Для выполнения команд с правами администратора
+мы будем использовать <code class="cmd">su -</code>.<br/>
+Переключитесь в режим root на обеих машинах.
+</div>
+
+<h2>Подготовка</h2>
+
+<p>Создаём файл-образ 100 МБ</p>
+
+<pre class="bash">
+dd if=/dev/zero of=~/disk.img bs=1M count=100
+</pre>
+ или
+<pre class="bash">
+truncate -s 100M disk.img
+</pre>
+
+<p>Привязываем к loop0</p>
+
+<pre class="bash">
+losetup /dev/loop0 ~/disk.img
+</pre>
+
+<p>Проверяем</p>
+
+<pre class="bash">
+lsblk /dev/loop0
+</pre>
+
+<p>Если нужно сбросить диск в «чистое» состояние:</p>
+
+<pre class="bash">
+ wipefs -a /dev/loop0
+</pre>
+ 
+<p>Далее мы будем знакомиться с утилитами разметки дисков.</p>
+ 
+<hr>
+
+<h2>cfdisk</h2>
+<p><strong>Запуск:</strong></p>
+
+<pre class="bash">
+cfdisk /dev/loop0
+</pre>
+
+<p><strong>Просмотр:</strong></p>
+
+<pre class="text">
+сразу видно таблицу.
+</pre>
+
+<p><strong>Создать раздел (MBR):</strong></p>
+<div class="text">
+      <ul>
+        <li>[New] → размер +50M → Primary → Enter</li>
+        <li>[Write] → yes → [Quit]</li>
+      </ul>
+</div>
+
+<p><strong>Создать раздел (GPT):</strong></p>
+<div class="text">
+      <ul>
+        <li>[New] → +50M</li>
+        <li>[Write] → yes</li>
+      </ul>
+</div>
+
+<p><strong>Удалить раздел:</strong></p>
+<div class="text">
+      <ul>
+        <li>Выбрать раздел → [Delete] → [Write]</li>
+      </ul>
+</div>
+
+<p>Разметить чистый диск:</p>
+<div class="text">
+      <ul>
+        <li>Если таблицы нет — cfdisk предложит выбрать dos/gpt.</li>
+        <li>Если есть — <code class="cmd">sudo cfdisk -z /dev/loop0</code> и выбрать dos/gpt.</li>
+      </ul>
+</div>
+
+<hr>
+
+
+
+<h2>fdisk</h2>
+
+<p><strong>Просмотр:</strong></p>
+
+<pre class="bash">
+fdisk -l /dev/loop0
+</pre>
+
+<p><strong>Интерактивный режим:</strong></p>
+
+<pre class="bash">
+fdisk /dev/loop0
+</pre>
+
+<p><strong>Создать MBR-таблицу и раздел:</strong></p>
+
+<pre class="bash">
+fdisk /dev/loop0
+</pre>
+
+<pre class="text">
+Command (m for help): <b>o</b>    # новая пустая MBR (dos)
+Command (m for help): <b>n</b>    # новый раздел
+Partition type: <b>p</b> (primary)
+Partition number: <b>1</b>
+First sector: <b>2048</b>
+Last sector: <b>+50M</b>
+Command (m for help): <b>p</b>    # посмотреть
+Command (m for help): <b>w</b>    # записать
+</pre>
+
+<p><strong>Удалить раздел:</strong></p>
+
+<pre class="bash">
+fdisk /dev/loop0
+</pre>
+
+<pre class="text">
+Command: <b>d</b>
+Partition number: <b>1</b>
+Command: <b>w</b>
+</pre>
+
+
+<p><strong>Разметить диск с нуля (GPT):</strong></p>
+
+
+<pre class="bash">
+fdisk /dev/loop0
+</pre>
+
+<pre class="text">
+Command: <b>g</b>    # создать новую GPT-таблицу<br>
+Command: <b>n</b><br>
+...<br>
+Command: <b>w</b><br>
+</pre>
+
+<hr>
+
+
+
+<h2>sfdisk</h2>
+
+<p><strong>Просмотр:</strong></p>
+
+<pre class="bash">
+sudo sfdisk -l /dev/loop0
+</pre>
+
+<p><strong>Создать раздел одной командой (MBR):</strong></p>
+
+<pre class="bash">
+echo 'start=2048, size=50M, type=83' | sudo sfdisk /dev/loop0
+</pre>
+
+<p><strong>Создать два раздела (GPT):</strong></p>
+
+<pre class="bash">
+echo 'label: gpt
+start=2048, size=50M, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4
+start=50M, size=100M, type=0657FD6D-A4AB-43C4-84E5-0933C84B4F4F' | sfdisk /dev/loop0
+</pre>
+(тип 0657... — Linux swap)
+
+<p><strong>Удалить раздел 1:</strong></p>
+
+<pre class="bash">
+sfdisk --delete /dev/loop0 1
+</pre>
+
+<p><strong>Удалить все разделы (очистить таблицу):</strong></p>
+
+<pre class="bash">
+echo 'label: dos' | sfdisk /dev/loop0   # или label: gpt
+</pre>
+
+<p><strong>Сохранить разметку в файл и восстановить:</strong></p>
+
+<pre class="bash">
+sfdisk -d /dev/loop0 > backup.txt
+sfdisk /dev/loop0 < backup.txt
+</pre>
+
+<hr>
+
+
+
+<h2>parted</h2>
+
+<p><strong>Просмотр:</strong></p>
+
+<pre class="bash">
+parted /dev/loop0 print
+</pre>
+
+<p><strong>Создать MBR + раздел 50M:</strong></p>
+
+<pre class="bash">
+parted /dev/loop0 mklabel msdos
+parted /dev/loop0 mkpart primary 1MiB 50MiB
+</pre>
+
+<p><strong>Создать GPT + раздел:</strong></p>
+
+<pre class="bash">
+parted /dev/loop0 mklabel gpt
+parted /dev/loop0 mkpart primary 1MiB 50MiB
+</pre>
+
+<p><strong>Удалить раздел 1:</strong></p>
+
+<pre class="bash">
+parted /dev/loop0 rm 1
+</pre>
+
+<p><strong>Разметить с нуля в интерактиве:</strong></p>
+
+<pre class="bash">
+parted /dev/loop0
+</pre>
+
+<pre class="text">
+(parted) <b>mklabel gpt</b>
+(parted) <b>mkpart primary 1MiB 50MiB</b>
+(parted) <b>mkpart primary 50MiB 100MiB</b>
+(parted) <b>print</b>
+(parted) <b>quit</b>
+</pre>
+
+<hr>
+
+
+
+<h2>gdisk</h2>
+
+<p><strong>Просмотр:</strong></p>
+
+<pre class="bash">
+gdisk -l /dev/loop0
+</pre>
+
+<p><strong>Создать GPT-таблицу и раздел:</strong></p>
+
+<pre class="bash">
+gdisk /dev/loop0
+</pre>
+
+<pre class="text">
+<b>o</b> → <b>Y</b>        # новая таблица
+<b>n</b> → <b>1</b> → Enter → <b>+50M</b> → <b>8300</b> → Enter
+<b>p</b>            # просмотр
+<b>w</b> → <b>Y</b>        # запись
+</pre>
+
+<p><strong>Удалить раздел:</strong></p>
+
+<pre class="bash">
+gdisk /dev/loop0
+</pre>
+
+<pre class="text">
+<b>d</b> → <b>1</b>
+<b>w</b> → <b>Y</b>
+</pre>
+
+<p><strong>Разметить чистый диск:</strong></p>
+
+<p>Если GPT-таблицы нет — gdisk сам спросит, создать ли её.</p>
+
+<p><strong>Конвертировать MBR → GPT:</strong></p>
+
+<pre class="bash">
+gdisk /dev/loop0
+</pre>
+
+<pre class="text">
+<b>w</b> → <b>Y</b>   # gdisk увидит MBR и предложит конвертацию
+</pre>
+
+<hr>
+
+  </body>
+</html>

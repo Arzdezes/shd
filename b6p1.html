@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="ru-RU">
+
+  <head>
+    <title>SHD</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="shd.css">
+  </head>
+
+<body>
+
+<h1> Лабораторная работа: iSCSI Target и Initiator</h1>
+
+<p><strong>Тема:</strong> Настройка iSCSI Target на ALT Server с использованием
+пакета <code>scsitarget-utils</code> (tgt), подключение Initiator с ALT Workstation с
+помощью <code>open-iscsi</code>, работа с блочными устройствами, настройка
+аутентификации CHAP.</p>
+
+<p><strong>Цель работы:</strong> Научиться настраивать iSCSI Target с использованием
+пакета <code>scsitarget-utils</code> (демон <code>tgt</code>), подключаться к нему с помощью
+<code>open-iscsi</code>, создавать файловые системы на удалённых блочных устройствах, а также
+настраивать CHAP-аутентификацию.</p>
+
+<p><strong>Топология:</strong></p>
+<ul>
+	<li><strong>Сервер (Target):</strong> ALT Server 11
+		(виртуальная машина)</li>
+	<li><strong>Клиент (Initiator):</strong> ALT Workstation 10.4
+		(хостовая система)</li>
+</ul>
+
+<hr/>
+
+
+
+<h2>Подготовка</h2>
+
+<div class="warning">
+<strong>Важно:</strong> Для выполнения команд с правами администратора
+мы будем использовать <code class="cmd">su -</code>.<br/>
+Переключитесь в режим root на обеих машинах.
+</div>
+
+<h3>1.1 Проверка сетевого взаимодействия</h3>
+
+<p><strong>На сервере (ALT Server):</strong></p>
+
+<pre class="bash">
+su -
+ip a
+</pre>
+
+<p>Запомните IP-адрес сервера (в примере используется 192.168.122.206).</p>
+
+<p><strong>На клиенте (ALT Workstation):</strong></p>
+
+<pre class="bash">
+su -
+ping -c 3 192.168.122.206
+</pre>
+
+<h3>1.2 Установка необходимых пакетов</h3>
+
+<p><strong>Особенность ALT Linux:</strong> Для iSCSI Target используется пакет
+<code>scsitarget-utils</code>, который предоставляет демон <code>tgt</code> и
+утилиты <code class="cmd">tgtadm</code>, <code class="cmd">tgt-admin</code>.
+Для клиента используется <code>open-iscsi</code>.</p>
+
+<p><strong>На сервере:</strong></p>
+
+<pre class="bash">
+apt-get update
+apt-get install scsitarget-utils
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Пакет <code>scsitarget-utils</code> содержит демон
+<code>tgt</code>, который реализует iSCSI Target, а также утилиты <code class="cmd">tgtadm</code>
+(для ручного управления) и <strong>tgt-admin</strong> (для работы с конфигурационными
+файлами).  В ALT Linux это стандартное решение для организации iSCSI Target.
+</div>
+
+<p><strong>На клиенте:</strong></p>
+
+<pre class="bash">
+apt-get update
+apt-get install open-iscsi multipath-tools
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Пакет <code>open-iscsi</code> содержит демон
+<code>iscsid</code> и утилиту <code class="cmd">iscsiadm</code> для работы с
+iSCSI-целями. <code>multipath-tools</code> понадобится во второй лабораторной работе.
+</div>
+
+<h3>1.3 Создание виртуального диска на сервере</h3>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Для демонстрации iSCSI удобно использовать файлы-образы
+вместо физических дисков. Это безопасно и не требует дополнительного оборудования.
+</div>
+
+<p><strong>На сервере:</strong></p>
+
+<p>Создаём каталог для образов дисков</p>
+
+<pre class="bash">
+mkdir -p /srv/iscsi
+</pre>
+
+<p>Создаём файл-образ размером 1 ГБ</p>
+
+<pre class="bash">
+dd if=/dev/zero of=/srv/iscsi/disk1.img bs=1M count=1024
+</pre>
+
+<p>Проверяем</p>
+
+<pre class="bash">
+ls -lh /srv/iscsi/
+</pre>
+
+
+<div class="explanation">
+<strong>Вопрос:</strong> Почему для iSCSI удобно использовать файлы-образы, а не
+целые диски? Какие преимущества и недостатки у этого подхода?
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 2: Настройка iSCSI Target через конфигурационный файл</h2>
+
+<h3>2.1 Структура конфигурационного файла</h3>
+
+<p>Основной конфигурационный файл <code>tgt</code> — <code>/etc/tgt/targets.conf</code>.
+Он имеет HTML-подобную структуру с тегами <code>&lt;target&gt;</code> и
+<code>&lt;/target&gt;</code>.</p>
+
+<p>Просмотр файла конфигурации по умолчанию</p>
+
+<pre class="bash">
+cat /etc/tgt/targets.conf
+</pre>
+
+<h3>2.2 Редактирование конфигурации</h3>
+
+<p>Откроем файл для редактирования:</p>
+
+<pre class="bash">
+nano /etc/tgt/targets.conf
+</pre>
+
+<p>Добавим в конец файла следующую конфигурацию:</p>
+
+<pre class="text">
+&lt;target iqn.2025-04.com.example:server.disk1&gt;
+    # Базовое устройство хранения (файл)
+    backing-store /srv/iscsi/disk1.img
+    
+    # Опции для повышения производительности
+    write-cache on
+    
+    # Контроль доступа (разрешаем все IP в локальной сети)
+    initiator-address 192.168.0.0/16<
+&lt;/target&gt;
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> <code>backing-store</code> указывает путь к блочному
+устройству или файлу-образу. <code>write-cache on</code> включает кэширование записи для
+повышения производительности. <code>initiator-address</code> ограничивает доступ к цели
+только указанной подсетью.
+</div>
+
+<h3>2.3 Запуск и проверка сервиса</h3>
+
+<p>Запускаем сервис tgt</p>
+
+<pre class="bash">
+systemctl enable tgt
+systemctl start tgt
+</pre>
+
+<p>Проверяем статус</p>
+
+<pre class="bash">
+systemctl status tgt
+</pre>
+
+<h3>2.4 Проверка экспортированных целей</h3>
+
+<p>Просмотр всех целей (targets)</p>
+
+<pre class="bash">
+tgt-admin --show
+</pre>
+
+<p><b>Или</b> с помощью tgtadm</p>
+
+<pre class="bash">
+tgtadm --lld iscsi --mode target --op show
+</pre>
+
+<p>Пример вывода:</p>
+
+<pre class="text">
+Target 1: iqn.2025-04.com.example:server.disk1
+    System information:
+        Driver: iscsi
+        State: ready
+    I_T nexus information:
+    LUN information:
+        LUN: 0
+            Type: controller
+            SCSI ID: IET     00010000
+            SCSI SN: beaf10
+            Size: 0 MB
+            Backing store: No
+        LUN: 1
+            Type: disk
+            SCSI ID: IET     00010001
+            SCSI SN: beaf11
+            Size: 1074 MB
+            Backing store: /srv/iscsi/disk1.img
+    Account information:
+    ACL information:
+        192.168.0.0/16
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Что означает LUN 0 в выводе? Почему он присутствует всегда?</p>
+<p><strong>Пояснение:</strong> LUN 0 — это всегда контроллер (виртуальное устройство
+управления).  Фактические диски начинаются с LUN 1. Это стандартное поведение протокола SCSI.</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 3: Настройка iSCSI Initiator</h2>
+
+<h3>3.1 Проверка демона iscsid</h3>
+
+<p><strong>На клиенте (ALT Workstation):</strong></p>
+
+<pre class="bash">
+systemctl status iscsid
+</pre>
+
+<p>Если сервис не активен, запустите:</p>
+
+<pre class="bash">
+systemctl enable iscsid
+systemctl start iscsid
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Демон <code>iscsid</code> управляет соединениями iSCSI
+и обрабатывает задачи аутентификации.
+</div>
+
+<h3>3.2 Обнаружение целей (Discovery)</h3>
+
+<p>Обнаруживаем доступные iSCSI цели на сервере</p>
+
+<pre class="bash">
+iscsiadm -m discovery -t sendtargets -p 192.168.122.206
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Команда отправляет запрос на порт 3260 сервера
+и возвращает список доступных целей. Результат сохраняется в базе данных
+<code>/</code><code>var/lib</code><code>/iscsi/send_targets/</code>.
+</div>
+
+<h3>3.3 Подключение к цели (Login)</h3>
+
+<p>Подключаемся ко всем обнаруженным целям</p>
+
+<pre class="bash">
+iscsiadm -m node --login
+</pre>
+
+<p>Также можно подключиться к конкретной цели:</p>
+
+<pre class="bash">
+iscsiadm -m node -T iqn.2025-04.com.example:server.disk1 -p 192.168.122.206 --login
+</pre>
+
+<h3>3.4 Проверка подключения</h3>
+
+<p>Просмотр активных сессий</p>
+
+<pre class="bash">
+iscsiadm -m session
+</pre>
+
+<p>Более детальная информация</p>
+
+<pre class="bash">
+iscsiadm -m session -P 1
+</pre>
+
+<p>Просмотр новых блочных устройств</p>
+
+<pre class="bash">
+lsblk
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Какое новое устройство появилось в системе?
+Какого оно размера?</p>
+<p><strong>Пояснение:</strong> После подключения iSCSI LUN отображается как
+обычный блочный диск (например, <code>/dev/sda</code>). С ним можно
+работать как с любым другим диском.</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 4: Работа с iSCSI-устройством</h2>
+
+<h3>4.1 Создание файловой системы</h3>
+
+<p><strong>На клиенте:</strong></p>
+
+<p>Создаём файловую систему ext4 на iSCSI-диске (уточните имя устройства!)</p>
+
+<pre class="bash">
+mkfs.ext4 /dev/sda
+</pre>
+
+<p>Создаём точку монтирования</p>
+
+<pre class="bash">
+mkdir -p /mnt/iscsi_data
+</pre>
+
+<p>Монтируем</p>
+
+<pre class="bash">
+mount /dev/sda /mnt/iscsi_data
+</pre>
+
+<p>Проверяем</p>
+
+<pre class="bash">
+df -h /mnt/iscsi_data
+</pre>
+
+<h3>4.2 Тестирование записи и чтения</h3>
+
+<p>Создаём тестовые файлы</p>
+
+<pre class="bash">
+echo &quot;iSCSI test data with scsitarget-utils&quot; &gt; /mnt/iscsi_data/test.txt
+dd if=/dev/urandom of=/mnt/iscsi_data/bigfile.dat bs=1M count=50
+</pre>
+
+<p>Проверяем</p>
+
+<pre class="bash">
+ls -la /mnt/iscsi_data/
+du -sh /mnt/iscsi_data/
+</pre>
+
+<h3>4.3 Настройка автоматического монтирования</h3>
+
+<p>Для автоматического монтирования при загрузке нужно добавить запись в
+<code>/etc/fstab</code>.</p>
+
+<div class="explanation">
+<strong>Важно:</strong> использовать опцию <code>_netdev</code>, указывающую,
+что устройство зависит от сети.
+</div>
+
+<p>Пример:</p>
+
+<pre class="text">
+/dev/sda /mnt/iscsi_data ext4 defaults,_netdev 0 0
+</pre>
+
+<hr/>
+
+
+
+<h2> Этап 5: Настройка CHAP-аутентификации</h2>
+
+<h3>5.1 Почему нужна аутентификация</h3>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> В чём опасность отключения аутентификации в iSCSI?</p>
+
+<p><strong>Пояснение:</strong> Без аутентификации любой, кто имеет доступ к сети,
+может подключиться к iSCSI Target и получить доступ к данным.  CHAP (Challenge-Handshake
+Authentication Protocol) решает эту проблему, требуя пароль при подключении.</p>
+</div>
+
+<h3>5.2 Настройка CHAP на сервере</h3>
+
+<p><strong>На сервере</strong> отредактируем <code>/etc/tgt/targets.conf</code>,
+добавив параметры аутентификации:</p>
+
+<pre class="bash">
+nano /etc/tgt/targets.conf
+</pre>
+
+<p>Приведём конфигурацию к следующему виду:</p>
+
+<pre class="text">
+&lt;target iqn.2025-04.com.example:server.disk1&gt;
+    # Базовое устройство хранения
+    backing-store /srv/iscsi/disk1.img
+    
+    # Опции производительности
+    write-cache on
+    
+    # Контроль доступа по IP
+    initiator-address 192.168.122.0/24
+    
+    # CHAP-аутентификация (incominguser = username password)
+    incominguser iscsi_user secret123
+&lt;/target&gt;
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Директива <code>incominguser</code> задаёт имя
+пользователя и пароль, которые клиент должен предоставить при подключении.
+</div>
+
+<h3>5.3 Перезагрузка конфигурации Target</h3>
+
+<p>Перезагружаем конфигурацию tgt</p>
+
+<pre class="bash">
+systemctl restart tgt
+</pre>
+
+<p>Проверяем, что цель с CHAP отображается правильно</p>
+
+<pre class="bash">
+tgt-admin --show
+</pre>
+
+<h3>5.4 Настройка CHAP на клиенте</h3>
+
+<p><strong>На клиенте:</strong></p>
+
+<p>Отключаемся от цели (если подключены):</p>
+
+<pre class="bash">
+iscsiadm -m node --logout
+</pre>
+
+<p>Настраиваем CHAP в файле конфигурации:</p>
+
+<pre class="bash">
+nano /etc/iscsi/iscsid.conf
+</pre>
+
+<p>Найдите и раскомментируйте (или добавьте) следующие строки:</p>
+
+<pre class="text">
+node.session.auth.authmethod = CHAP
+node.session.auth.username = iscsi_user
+node.session.auth.password = secret123
+</pre>
+
+<p>Для обнаружения также может потребоваться аутентификация</p>
+
+<pre class="text">
+discovery.sendtargets.auth.authmethod = CHAP
+discovery.sendtargets.auth.username = iscsi_user
+discovery.sendtargets.auth.password = secret123
+</pre>
+
+<p>Обнаруживаем цели заново</p>
+
+<pre class="bash">
+iscsiadm -m discovery -t sendtargets -p 192.168.122.206
+</pre>
+
+<p>Подключаемся:</p>
+
+<pre class="bash">
+iscsiadm -m node --login
+</pre>
+
+<p>Проверяем:</p>
+
+<pre class="bash">
+iscsiadm -m session
+lsblk
+</pre>
+
+<div class="explanation">
+<strong>Вопрос:</strong> Что произойдёт, если указать неправильный пароль в конфигурации?
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 6: Очистка</h2>
+
+<h3>На клиенте:</h3>
+
+<p>Размонтируем</p>
+
+<pre class="bash">
+umount /mnt/iscsi_data
+</pre>
+
+<p>Удаляем запись из fstab (если добавляли)</p>
+
+<p>Отключаемся от iSCSI</p>
+
+<pre class="bash">
+iscsiadm -m node --logout
+</pre>
+
+<p>Опционально: удаляем цель из базы</p>
+
+<pre class="bash">
+iscsiadm -m node -T iqn.2025-04.com.example:server.disk1 -p 192.168.122.206 -o delete
+</pre>
+
+<h3>На сервере:</h3>
+
+<p>Останавливаем сервис</p>
+
+<pre class="bash">
+systemctl stop tgt
+</pre>
+
+<p>Удаляем образ диска (опционально)</p>
+
+<pre class="bash">
+rm -f /srv/iscsi/disk1.img
+</pre>
+
+<hr/>
+
+
+
+<h2>Контрольные вопросы</h2>
+
+<ol>
+	<li>В чём разница между <code class="cmd">tgtadm</code> и
+		<code class="cmd">tgt-admin</code>? Какой из них используется для работы
+		с конфигурационными файлами?</li>
+	<li>Какой протокол и порт использует iSCSI по умолчанию? </li>
+	<li>Что означает опция <code>backing-store</code> в конфигурации
+		<code>/etc/tgt/targets.conf</code>? </li>
+	<li>Как просмотреть список всех активных iSCSI целей на сервере?</li>
+	<li>Что такое CHAP и зачем он нужен в iSCSI?</li>
+	<li>Как проверить, какие сессии iSCSI активны на клиенте?</li>
+	<li>Что делает опция <code>_netdev</code> в <code>/etc/fstab</code> для
+		iSCSI-устройств?</li>
+	<li>Как добавить второй LUN в существующий Target? (Подсказка: в конфигурации
+		можно указать несколько <code>backing-store</code>)</li>
+</ol>
+
+<hr/>
+
+
+
+<h2>Выводы</h2>
+
+<ul>
+	<li>iSCSI позволяет предоставлять блочные устройства по IP-сети.</li>
+	<li>В ALT Linux для настройки iSCSI Target используется пакет
+		<code>scsitarget-utils</code> (демон <code>tgt</code>).</li>
+	<li>Конфигурация Target задаётся в файле <code>/etc/tgt/targets.conf</code>.</li>
+	<li>Для подключения к iSCSI Target на клиенте используется пакет
+		<code>open-iscsi</code>.</li>
+	<li>После подключения iSCSI LUN отображается как обычное блочное устройство
+		(<code>/dev/sdb</code>).</li>
+	<li>Для безопасности в production-среде необходимо использовать CHAP-аутентификацию
+		(<code>incominguser</code>).</li>
+</ul>
+
+<hr/>
+
+</body>
+</html>

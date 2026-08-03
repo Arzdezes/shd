@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="ru-RU">
+
+  <head>
+    <title>SHD</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="shd.css">
+  </head>
+
+<body>
+
+<h1><strong>Лабораторная работа 2: Шифрование блочных устройств (cryptsetup)</strong></h1>
+
+<div class="warning">
+<strong>Важно:</strong> Для выполнения команд с правами администратора
+мы будем использовать <code class="cmd">su -</code>.<br/>
+</div>
+
+<h2><strong>1. Подготовка loop-устройства</strong></h2>
+
+<p>Создадим файлы-образы (2 штуки по 100 МБ)</p>
+
+<pre class="bash">
+dd if=/dev/zero of=disk1.img bs=1M count=100
+dd if=/dev/zero of=disk2.img bs=1M count=100
+</pre>
+
+<p>Подключим один образ как loop-устройство</p>
+
+<pre class="bash">
+losetup /dev/loop0 disk1.img
+</pre>
+
+<p>Посмотрим, какие устройства получились</p>
+
+<pre class="bash">
+losetup -a                # Список всех loop
+lsblk                     # Древовидный вывод
+</pre>
+
+<h2><strong>2. Шифрование LUKS</strong></h2>
+<table>
+    <thead>
+	<tr>
+	    <th>Действие</th>
+	    <th>Команда / Ключи</th>
+	</tr>
+    </thead>
+    <tbody>
+	<tr>
+	    <td>Инициализация с параметрами шифрования</td>
+	    <td><code class="cmd">cryptsetup luksFormat /dev/loop0</code>
+		<br/> или <br/>
+		<code class="cmd">cryptsetup luksFormat -c aes-xts-plain64 -h sha256 -s 512
+		/dev/loop0</code>
+		<br/>
+		• <code>-c</code> — шифр (например, <code>aes-xts-plain64</code>,
+		<code>aes-cbc-essiv:sha256</code>) <br/>
+		• <code>-h</code> — хэш-функция для генерации ключа
+		(например, <code>sha256</code>, <code>sha512</code>) <br/>
+		• <code>-s</code> — размер мастер-ключа в битах (для XTS обычно 256 или 512)
+	    </td>
+	</tr>
+	<tr>
+	    <td>Открытие (расшифровка)</td>
+	    <td><code class="cmd">cryptsetup luksOpen /dev/loop0 my_encrypted_volume</code></td>
+	</tr>
+	<tr>
+	    <td>Форматирование расшифрованного тома</td>
+	    <td><code class="cmd">mkfs.ext4 /dev/mapper/my_encrypted_volume</code></td>
+	</tr>
+	<tr>
+	    <td>Монтирование</td>
+	    <td><code class="cmd">mount /dev/mapper/my_encrypted_volume /mnt/secret</code></td>
+	</tr>
+	<tr>
+	    <td>Закрытие</td>
+	    <td><code class="cmd">umount /mnt/secret</code>
+		<br/>
+	    	<code class="cmd">cryptsetup luksClose my_encrypted_volume</code></td>
+	</tr>
+	<tr>
+	    <td>Просмотр информации (включая использованные параметры)</td>
+	    <td><code class="cmd">cryptsetup luksDump /dev/loop0</code></td>
+	</tr>
+	<tr>
+	    <td>Управление ключами</td>
+	    <td><code class="cmd">cryptsetup luksAddKey /dev/loop0</code> <br/>
+		<code class="cmd">cryptsetup luksRemoveKey /dev/loop0</code> <br/>
+		<code class="cmd">cryptsetup luksChangeKey /dev/loop0</code></td>
+	</tr>
+    </tbody>
+</table>
+
+<h2>3. Комбинация RAID + LUKS</h2>
+<table>
+    <col width="200"/>
+    <col width="*"/>
+    <thead>
+	<tr>
+	    <th>Вариант </th>
+	    <th>Последовательность команд</th>
+	</tr>
+    </thead>
+    <tbody>
+	<tr>
+	    <td>RAID поверх LUKS</td>
+	    <td>1. Зашифровать диски: <br/>
+		<code class="cmd">cryptsetup luksFormat /dev/loop0</code>
+		и <code class="cmd">/dev/loop1</code> <br/><br/>
+		2. Открыть:<br/>
+		<code class="cmd">cryptsetup luksOpen /dev/loop0 crypt-loop0</code>
+			(и для loop1) <br/><br/>
+		3. Создать RAID:<br/>
+		<code class="cmd">mdadm --create /dev/md0 --level=1 --raid-devices=2 /dev/mapper/crypt-loop0 /dev/mapper/crypt-loop1</code>
+	    </td>
+	</tr>
+	<tr>
+	    <td>LUKS поверх RAID</td>
+	    <td>1. Создать RAID:<br/>
+		<code class="cmd">mdadm --create /dev/md0 --level=1 --raid-devices=2
+			/dev/loop0 /dev/loop1</code>
+		<br/><br/>
+		2. Зашифровать массив:<br/>
+		<code class="cmd">cryptsetup luksFormat /dev/md0</code> <br/><br/>
+		3. Открыть:<br/>
+		<code class="cmd">cryptsetup luksOpen /dev/md0 crypt-raid</code> <br/><br/>
+		4. Создать ФС:<br/>
+		<code class="cmd">mkfs.ext4 /dev/mapper/crypt-raid</code>
+	    </td>
+	</tr>
+</tbody>
+</table>
+</body>
+</html>

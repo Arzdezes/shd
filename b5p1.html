@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="ru-RU">
+
+  <head>
+    <title>SHD</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="shd.css">
+  </head>
+
+<body>
+
+<h1> Лабораторная работа 1: Настройка Samba-сервера и клиента</h1>
+
+<p><strong>Тема:</strong> Развёртывание Samba-сервера на ALT Server, настройка публичных
+и защищённых шары, подключение с ALT Workstation, эксперименты с правами доступа
+и протоколами SMB.</p>
+
+<p><strong>Цель работы:</strong> Научиться настраивать Samba-сервер в режиме standalone,
+создавать ресурсы с различными уровнями доступа, подключать их с клиента Linux,
+понимать разницу между гостевым доступом и аутентификацией, а также отработать
+настройку прав доступа на уровне файловой системы и Samba.</p>
+
+<p><strong>Топология:</strong></p>
+
+<ul>
+	<li><strong>Сервер:</strong> ALT Server 11 (виртуальная машина)</li>
+	<li><strong>Клиент:</strong> ALT Workstation 10.4 (хостовая система)</li>
+</ul>
+
+<hr/>
+
+
+
+<h2>Подготовка</h2>
+
+<div class="warning">
+<p><strong>Важно:</strong> Для выполнения команд с правами администратора
+мы будем использовать <code class="cmd">su -</code>.<br/>
+Переключитесь в режим root на обеих машинах.</p>
+</div>
+
+<p><strong>На сервере (ALT Server)</strong></p>
+
+<pre class="bash">
+su -
+</pre>
+
+<p><strong>На клиенте (ALT Workstation)</strong></p>
+
+<pre class="bash">
+su -
+</pre>
+
+<h3>1.1 Проверка сетевого взаимодействия</h3>
+
+<p>Прежде чем настраивать Samba, убедимся, что сервер и клиент видят друг друга.</p>
+
+<p><strong>На сервере:</strong></p>
+
+<pre class="bash">
+ip a
+</pre>
+
+<p>Запомните IP-адрес сервера (например, <code>192.168.122.206</code>).</p>
+
+<p><strong>На клиенте:</strong></p>
+
+<pre class="bash">
+ping -c 3 &lt;IP-адрес_сервера&gt;
+</pre>
+
+<h3>1.2 Установка необходимых пакетов</h3>
+
+<p><strong>На сервере (ALT Server 11):</strong></p>
+<p>ALT Server 11 поставляется с Samba версии 4.21.9. Установим серверную часть:</p>
+
+<pre class="bash">
+apt-get update
+apt-get install samba samba-client samba-test
+</pre>
+
+<div class="explanation">
+<p><strong>Пояснение:</strong> Пакет <code>samba</code> содержит серверную часть
+(демоны <code>smbd</code> и <code>nmbd</code>), а <code>samba-client</code><code>
+и samba-test</code> — клиентские утилиты для тестирования.</p>
+</div>
+
+<p><strong>На клиенте (ALT Workstation):</strong></p>
+
+<p>Для монтирования Samba-шар с Linux-клиента необходим пакет <code>cifs-utils</code>:</p>
+
+<pre class="bash">
+apt-get update
+apt-get install cifs-utils samba-client
+</pre>
+
+<div class="explanation">
+<p><strong>Пояснение:</strong> <code>cifs-utils</code> содержит утилиту <code
+class="cmd">mount.cifs</code> для монтирования SMB-ресурсов. <code>samba-client</code>
+установим для диагностики (<code class="cmd">smbclient</code>,
+<code class="cmd">smbstatus</code>).</p>
+</div>
+
+<h3>1.3 Проверка установки</h3>
+
+<p><strong>На сервере:</strong></p>
+
+<pre class="bash">
+systemctl status smb
+systemctl status nmb
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> В каком состоянии находятся сервисы? Если они не активны,
+как их запустить?</p>
+
+<p><strong>Пояснение:</strong> Сервисы <code>smb</code>
+(основной файловый сервер) и <code>nmb</code>
+(NetBIOS name server, для обнаружения в сети)
+должны быть активны. Запустите их, если
+нет: <code class="cmd">systemctl enable --now smb
+nmb</code>.</p>
+</div>
+
+<hr/>
+
+
+<h2>Этап 2: Создание каталогов для шары и тестовых данных</h2>
+
+<h3>2.1 Создание каталогов с разными сценариями доступа</h3>
+
+<p><strong>На сервере:</strong></p>
+
+<p>Создадим три каталога для демонстрации разных режимов доступа:</p>
+
+<p>Публичная шара (только чтение для всех)</p>
+
+<pre class="bash">
+mkdir -p /srv/samba/public
+echo &quot;Public file - доступен всем&quot; &gt; /srv/samba/public/readme.txt
+</pre>
+
+<p>Шара для чтения-записи с аутентификацией</p>
+
+<pre class="bash">
+mkdir -p /srv/samba/private
+echo &quot;Private area ready&quot; &gt; /srv/samba/private/welcome.txt
+</pre>
+<p>Upload-зона (гостевой доступ на запись)</p>
+
+<pre class="bash">
+mkdir -p /srv/samba/upload
+echo &quot;Upload area ready&quot; &gt; /srv/samba/upload/welcome.txt
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Как вы думаете, почему для upload-зоны мы создаём отдельный
+каталог? Какие права нужно будет выставить?</p>
+</div>
+
+<h3>2.2 Настройка прав доступа</h3>
+
+<p>Добавим группу sambashare</p>
+
+<pre class="bash">
+groupadd sambashare
+</pre>
+
+<p>Для публичной шары — права на чтение для всех</p>
+
+<pre class="bash">
+chmod 755 /srv/samba/public
+</pre>
+
+<p>Для приватной шары — доступ только для владельца и группы</p>
+
+<pre class="bash">
+chown root:sambashare /srv/samba/private
+chmod 770 /srv/samba/private
+</pre>
+
+<p>Для upload-зоны — все могут писать, но не удалять чужие файлы (sticky bit)</p>
+
+<pre class="bash">
+chmod 1777 /srv/samba/upload
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Sticky bit (<code class="cmd">chmod 1777</code>) на каталоге upload
+гарантирует, что пользователь может удалить только свои файлы, даже если имеет право на
+запись в каталог. Это стандартная практика для upload-каталогов.
+</div>
+
+<h3>2.3 Создание пользователей для аутентификации</h3>
+
+<p>Создаём системного пользователя (должен существовать в системе)</p>
+
+<pre class="bash">
+useradd -m -s /bin/bash smbuser
+passwd smbuser  # Установите пароль (например, &quot;password&quot;)
+</pre>
+
+<p>Добавляем пользователя в группу sambashare</p>
+
+<pre class="bash">
+usermod -aG sambashare smbuser
+</pre>
+
+<p>Добавляем пользователя в базу паролей Samba</p>
+
+<pre class="bash">
+smbpasswd -a smbuser
+</pre>
+
+<div class="explanation">
+<p><strong>Пояснение:</strong> Samba использует отдельную базу паролей
+(<code>smbpasswd</code>), не зависящую от системных паролей.  Пользователь с
+системным аккаунтом <code>smbuser</code> и его пароль Samba могут отличаться.</p>
+
+<p><strong>Вопрос:</strong> Зачем нужна отдельная база паролей? Как это связано
+с безопасностью?</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 3: Настройка Samba (/etc/samba/smb.conf)</h2>
+
+<h3>3.1 Резервное копирование конфигурации</h3>
+
+<pre class="bash">
+cp /etc/samba/smb.conf /etc/samba/smb.conf.bak
+</pre>
+
+<h3> 3.2 Редактирование конфигурационного файла</h3>
+
+<p>Откроем <code>/etc/samba/smb.conf</code> для редактирования:</p>
+
+<pre class="bash">
+mcedit /etc/samba/smb.conf
+</pre>
+или
+<pre class="bash">
+nano /etc/samba/smb.conf
+</pre>
+
+<p>Приведём файл к следующему виду:</p>
+
+<pre class="text">
+[global]
+    workgroup = WORKGROUP
+    server string = ALT Samba Server
+    security = user
+    map to guest = Bad User
+    log file = /var/log/samba/log.%m
+    max log size = 50
+    
+    # Кодировки для корректной работы с русскими именами файлов
+    unix charset = UTF-8
+    dos charset = CP866
+    
+    # Оптимизация производительности
+    socket options = TCP_NODELAY IPTOS_LOWDELAY
+    read raw = yes
+    write raw = yes
+
+# Публичная шара (только чтение, гостевой доступ)
+[public]
+    comment = Public Share
+    path = /srv/samba/public
+    browseable = yes
+    read only = yes
+    guest ok = yes
+    create mask = 0644
+    directory mask = 0755
+
+# Приватная шара (доступ по паролю)
+[private]
+    comment = Private Share
+    path = /srv/samba/private
+    browseable = yes
+    read only = no
+    guest ok = no
+    valid users = smbuser
+    create mask = 0660
+    directory mask = 0770
+
+# Upload-зона (гостевой доступ на запись)
+[upload]
+    comment = Upload Area
+    path = /srv/samba/upload
+    browseable = yes
+    read only = no
+    guest ok = yes
+    create mask = 0666
+    directory mask = 0777
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Проанализируйте каждую секцию. Что означают опции
+<code>browseable</code>, <code>guest ok</code>, <code>valid users</code>,
+<code>create mask</code>?</p>
+
+<p><strong>Пояснение:</strong></p>
+<ul>
+	<li><code>map to guest = Bad User</code> — неверные логины автоматически
+		перенаправляются на гостевой доступ (важно для upload-зоны) </li>
+	<li><code>create mask</code> / <code>directory mask</code> — права, с которыми
+		создаются новые файлы и папки внутри шары </li>
+	<li><code>valid users</code> — список пользователей, имеющих доступ к шаре.</li>
+</ul>
+</div>
+
+<h3>3.3 Проверка конфигурации</h3>
+
+<pre class="bash">
+testparm
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> <code class="cmd">testparm</code> проверяет синтаксис
+конфигурационного файла и показывает итоговую конфигурацию после обработки всех включений
+и переменных.
+</div>
+
+<h3>3.4 Применение конфигурации</h3>
+
+<p>Перезапускаем сервисы</p>
+
+<pre class="bash">
+systemctl restart smb nmb
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Для применения изменений достаточно перезапустить сервисы. В
+ALT Linux это <code class="cmd">systemctl restart smb nmb</code>.
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 4: Локальная проверка на сервере</h2>
+
+<h3>4.1 Проверка доступности ресурсов</h3>
+
+<p>Список всех доступных ресурсов на сервере</p>
+
+<pre class="bash">
+smbclient -L localhost -N
+</pre>
+
+<div class="explanation">
+<strong>Вопрос:</strong> Какие ресурсы вы видите? Почему <code>private</code> не показывается
+при анонимном подключении?
+</div>
+
+<h3>4.2 Проверка подключения к разным ресурсам</h3>
+
+<p>Подключение к публичной шаре</p>
+
+<pre class="bash">
+smbclient //localhost/public -N
+</pre>
+
+<p>Внутри интерактивной оболочки выполните:</p>
+
+<pre class="bash">
+ls
+exit
+</pre>
+
+<p>Подключение к приватной шаре</p>
+
+<pre class="bash">
+smbclient //localhost/private -U smbuser
+</pre>
+
+<p>Внутри оболочки:</p>
+
+<pre class="bash">
+mkdir test_folder
+ls
+exit
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Удалось ли создать папку в приватной шаре? Почему?</p>
+</div>
+
+<p>Подключение к upload-зоне</p>
+
+<pre class="bash">
+smbclient //localhost/upload -N
+</pre>
+
+<p>Внутри оболочки:</p>
+
+<pre class="bash">
+mkdir test_upload
+put /etc/hosts hosts_copy.txt
+ls
+exit
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> <code class="cmd">smbclient</code>
+— это FTP-подобный клиент для тестирования SMB-ресурсов. Команда <code>-N</code>
+означает &quot;без пароля&quot; (гостевой доступ).
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 5: Подключение с клиента (ALT Workstation)</h2>
+
+<h3>5.1 Создание точек монтирования</h3>
+
+<p><strong>На клиенте:</strong></p>
+
+<pre class="bash">
+mkdir -p /mnt/samba/public
+mkdir -p /mnt/samba/private
+mkdir -p /mnt/samba/upload
+</pre>
+
+<h3>5.2 Монтирование публичной шары (гостевой доступ)</h3>
+
+<pre class="bash">
+mount -t cifs //&lt;IP-сервера&gt;/public /mnt/samba/public -o guest,vers=3.0
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Опция <code>guest</code> означает анонимное подключение. Протокол
+<code>vers=3.0</code> указывает использование SMB 3.0.
+</div>
+
+<h3>5.3 Монтирование приватной шары (с аутентификацией)</h3>
+
+<p>Простой способ: пароль в командной строке (небезопасно, но для теста приемлемо)</p>
+
+<pre class="bash">
+mount -t cifs //&lt;IP-сервера&gt;/private /mnt/samba/private -o username=smbuser,password=password,vers=3.0
+</pre>
+
+<div class="explanation">
+<strong>Вопрос:</strong> Почему передавать пароль в командной строке небезопасно?
+</div>
+
+<p>Безопасный способ: через файл учётных данных:</p>
+
+<p>Отмонтируем шару</p>
+
+<pre class="bash">
+umount /mnt/samba/private
+</pre>
+
+<p>Создаём файл с учётными данными</p>
+
+<pre class="bash">
+cat &gt; /root/.smbcredentials &lt;&lt; EOF
+username=smbuser
+password=password
+domain=WORKGROUP
+EOF
+</pre>
+
+<p>Ограничиваем доступ к файлу</p>
+
+<pre class="bash">
+chmod 600 /root/.smbcredentials
+</pre>
+
+<p>Монтируем с использованием файла</p>
+
+<pre class="bash">
+mount -t cifs //&lt;IP-сервера&gt;/private /mnt/samba/private -o credentials=/root/.smbcredentials,vers=3.0
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Файл учётных данных должен
+быть доступен только root, так как содержит пароль в открытом виде.
+Какой способ лучше?
+</div>
+
+<h3>5.4 Монтирование upload-зоны</h3>
+
+<pre class="bash">
+mount -t cifs //&lt;IP-сервера&gt;/upload /mnt/samba/upload -o guest,vers=3.0
+</pre>
+
+<h3> 5.5 Проверка монтирования</h3>
+
+<pre class="bash">
+df -h | grep samba
+mount | grep cifs
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> <code class="cmd">df -h</code> покажет точки
+монтирования и использованное место. <code class="cmd">mount | grep cifs</code> —
+более детальную информацию о смонтированных SMB-ресурсах.
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 6: Тестирование доступа</h2>
+
+<h3>6.1 Проверка публичной шары (только чтение)</h3>
+
+<p><strong>На клиенте:</strong></p>
+<p>Чтение — должно работать</p>
+
+<pre class="bash">
+cat /mnt/samba/public/readme.txt
+</pre>
+
+<p>Запись — должна завершиться ошибкой</p>
+
+<pre class="bash">
+echo &quot;test&quot; &gt; /mnt/samba/public/test.txt
+</pre>
+
+<div class="explanation">
+<strong>Вопрос:</strong> Почему запись не удалась? Какая опция в
+<code>smb.conf</code> это контролирует?
+</div>
+
+<h3>6.2 Проверка приватной шары (чтение-запись)</h3>
+
+<p>Чтение</p>
+
+<pre class="bash">
+cat /mnt/samba/private/welcome.txt
+</pre>
+
+<p>Запись</p>
+
+<pre class="bash">
+echo &quot;secret data&quot; &gt; /mnt/samba/private/secret.txt
+ls -la /mnt/samba/private/
+</pre>
+
+<div class="explanation">
+<strong>Вопрос:</strong> Какие права у созданного файла? Откуда они взялись?
+</div>
+
+<h3>6.3 Проверка upload-зоны (гостевая запись)</h3>
+
+<p>Запись от имени гостя</p>
+
+<pre class="bash">
+echo &quot;uploaded by guest&quot; &gt; /mnt/samba/upload/guest_file.txt
+</pre>
+
+<p>Создание папки от имени гостя</p>
+
+<pre class="bash">
+mkdir /mnt/samba/upload/guest_folder
+</pre>
+
+<h3> 6.4 Проверка механизма маппинга пользователей</h3>
+
+<p><strong>На сервере:</strong> (в другом терминале или после завершения):</p>
+
+<p>Кто владелец файлов, созданных через upload-шару?</p>
+
+<pre class="bash">
+ls -la /srv/samba/upload/
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Кто является владельцем файлов, загруженных в
+upload-шару? Почему не <code>smbuser</code>?</p>
+
+<p><strong>Пояснение:</strong> При гостевом доступе (<code>guest ok = yes</code>)
+Samba маппит всех пользователей на анонимного (обычно <code>nobody</code>), если не задан
+<code>force user</code>. Это важно для безопасности.</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 7: Дополнительные эксперименты</h2>
+
+<h3>7.1 Наблюдение за активными соединениями</h3>
+
+<p><strong>На сервере:</strong></p>
+
+<pre class="bash">
+smbstatus
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> <code class="cmd">smbstatus</code>
+показывает текущие подключения, открытые
+файлы и блокировки.
+</div>
+
+
+
+<h3>7.2 Монтирование с разными версиями протокола</h3>
+
+<p><strong>На клиенте:</strong> (сначала отмонтируйте upload-шару):</p>
+
+<pre class="bash">
+umount /mnt/samba/upload
+</pre>
+
+<p>Монтируем с SMB 2.0</p>
+
+<pre class="bash">
+mount -t cifs //&lt;IP-сервера&gt;/upload /mnt/samba/upload -o guest,vers=2.0
+</pre>
+
+<p>Проверяем версию протокола</p>
+
+<pre class="bash">
+mount | grep upload
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Чем отличается SMB 2.0 от SMB 3.0? Почему рекомендуется
+использовать более новые версии?</p>
+
+<p><strong>Пояснение:</strong> ALT Server 11 поддерживает SMB 3.0 с улучшенным шифрованием и
+производительностью. Для безопасности рекомендуется использовать <code>vers=3.0</code>
+или выше.</p>
+</div>
+
+<h3>7.3 Блокировка файла</h3>
+
+<p><strong>На клиенте:</strong></p>
+
+<pre class="bash">
+nano /mnt/samba/upload/guest_file.txt
+</pre>
+
+<p><strong>На сервере:</strong></p>
+
+<pre class="bash">
+smbstatus
+</pre>
+
+<p><strong>На клиенте:</strong></p>
+
+<b>Ctrl+X</b>
+
+<div class="explanation">
+<p><strong>Пояснение:</strong> <code class="cmd">nano</code> создает временный
+файл <code>.guest_file.txt.swp</code> и открывает его на
+запись. Что и отображает smbstatus в
+секции <code>Locked files.</code>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 8: Очистка</h2>
+
+<h3>На клиенте:</h3>
+
+<p>Размонтируем всё</p>
+
+<pre class="bash">
+umount /mnt/samba/public
+umount /mnt/samba/private
+umount /mnt/samba/upload
+</pre>
+
+<p>Удаляем временные файлы (опционально)</p>
+
+<pre class="bash">
+rm -f /root/.smbcredentials
+</pre>
+
+<h3> На сервере:</h3>
+
+<p>Останавливаем Samba (по желанию)</p>
+
+<pre class="bash">
+systemctl stop smb nmb
+</pre>
+
+<p>Удаляем пользователя Samba</p>
+
+<pre class="bash">
+smbpasswd -x smbuser
+userdel -r smbuser
+groupdel sambashare
+</pre>
+
+<p>Удаляем каталоги</p>
+
+<pre class="bash">
+rm -rf /srv/samba
+</pre>
+
+<p>Возвращаем конфиг по умолчанию (по желанию)</p>
+
+<pre class="bash">
+mv -f /etc/samba/smb.conf.bak /etc/samba/smb.conf
+</pre>
+
+<hr/>
+
+
+<h2> Контрольные вопросы</h2>
+<ol>
+	<li>В чём разница между <code>security = user</code> и <code>security = share</code>?
+		Почему <code>user</code> предпочтительнее?</li>
+	<li>Что делает опция <code>map to guest = Bad User</code>?</li>
+	<li>Как Samba обрабатывает аутентификацию? Чем отличается системный пароль
+		от SMB-пароля?</li>
+	<li>Что такое <code>create mask</code> и <code>directory mask</code>? Как они влияют
+		на создаваемые файлы?</li>
+	<li>Как монтировать Samba-шару с использованием файла учётных данных?
+		Зачем это нужно?</li>
+	<li>Что показывает команда <code class="cmd">smbstatus</code> на сервере?</li>
+	<li>Как указать версию протокола SMB при монтировании?</li>
+	<li>Что такое sticky bit (<code class="cmd">chmod 1777</code>) и зачем он нужен
+		на upload-каталоге?</li>
+	<li>Как сделать шару невидимой при просмотре списка ресурсов (<code>browseable
+		= no</code>)?</li>
+	<li>Как ограничить доступ к шаре только для определённых пользователей?</li>
+</ol>
+
+<hr/>
+
+
+
+<h2>Выводы</h2>
+
+<ul>
+	<li>Samba — мощная реализация протоколов SMB/CIFS, позволяющая организовать
+		файловый сервер в Linux-среде.</li>
+	<li>ALT Server 11 использует Samba 4.20 с поддержкой SMB 3.0, улучшенным
+		шифрованием и производительностью </li>
+	<li>Настройка Samba требует внимания к двум уровням прав: файловая система Linux
+		(права на каталог) и конфигурация Samba (<code>read only</code>,
+		<code>valid users</code>, <code>create mask</code>).</li>
+	<li>Гостевой доступ (<code>guest ok = yes</code>) удобен для публичных ресурсов,
+		но требует осторожности — все операции выполняются от имени анонимного
+		пользователя.</li>
+	<li>Для аутентификации необходимо создать системного пользователя и добавить его
+		в базу <code class="cmd">smbpasswd</code> </li>
+	<li>Для монтирования с Linux-клиента используется пакет <code>cifs-utils</code>
+		и команда <code class="cmd">mount -t cifs</code> с указанием версии протокола </li>
+	<li>Для автоматического монтирования при загрузке используются записи в
+		<code>/etc/fstab</code> с опцией <code>_netdev</code>.</li>
+</ul>
+
+<hr/>
+
+</body>
+</html>

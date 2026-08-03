@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="ru-RU">
+
+  <head>
+    <title>SHD</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="shd.css">
+  </head>
+
+<body>
+
+<h1> Лабораторная работа: iSCSI Multipath (MPIO) с scsitarget-utils</h1>
+
+<p><strong>Тема:</strong> Настройка многопутевого доступа (MPIO) к iSCSI Target
+на базе <code>scsitarget-utils</code>, отказоустойчивость и балансировка нагрузки между
+двумя сетевыми путями.</p>
+
+<p><strong>Цель работы:</strong> Научиться настраивать iSCSI Target с двумя сетевыми
+порталами (используя несколько <code>initiator-address</code> или несколько конфигураций),
+подключать клиент через два сетевых интерфейса, настраивать multipath для объединения путей
+в одно устройство, тестировать отказ одного сетевого пути.</p>
+
+<p><strong>Топология:</strong></p>
+<ul>
+	<li><strong>Сервер (Target):</strong> ALT Server 11 (виртуальная машина)
+		— с двумя сетевыми интерфейсами:</li>
+	<ul>
+		<li>eth0: 192.168.122.206</li>
+		<li>eth1: 192.168.123.206 (вторая подсеть)</li>
+	</ul>
+	<li><strong>Клиент (Initiator):</strong> ALT Workstation 10.4 (хостовая
+		система) — с VirtualBox Host-Only интерфейсами:</li>
+	<ul>
+		<li>vboxnet0: 192.168.122.1</li>
+		<li>vboxnet1: 192.168.123.1</li>
+	</ul>
+</ul>
+
+<hr/>
+
+
+
+<h2>Подготовка</h2>
+
+<h3>1.1 Настройка двух сетевых интерфейсов на сервере (ВМ)</h3>
+
+<p>Эта конфигурация настраивается <strong>на уровне VirtualBox</strong>. Добавьте второй
+сетевой адаптер в настройках виртуальной машины:</p>
+
+<p>На ВМ (ALT Server) проверяем интерфейсы</p>
+
+<pre class="bash">
+ip a
+</pre>
+
+<p>Должны увидеть eth0 и eth1</p>
+
+<p>Если второй интерфейс не настроен, создайте конфигурацию в ALT Linux:</p>
+
+<p>Создаём конфигурацию для eth1</p>
+
+<pre class="bash">
+cat &gt; /etc/net/ifaces/eth1/options &lt;&lt; EOF
+TYPE=eth
+BOOTPROTO=static
+SYSTEMCTL=yes
+EOF
+</pre>
+
+<p>Указываем IP-адрес</p>
+
+<pre class="bash">
+cat &gt; /etc/net/ifaces/eth1/ipv4address &lt;&lt; EOF
+192.168.123.206/24
+EOF
+</pre>
+
+<p>Перезапускаем сеть</p>
+
+<pre class="bash">
+systemctl restart network
+</pre>
+
+<h3> 1.2 Настройка сетевых интерфейсов на клиенте (хост ALT Workstation)</h3>
+
+<p>VirtualBox создаёт интерфейсы <code>vboxnet0</code> и <code>vboxnet1</code> для Host-Only
+сетей.  Назначим им IP-адреса:</p>
+
+<p>Назначаем IP для первой сети</p>
+
+<pre class="bash">
+ip addr add 192.168.122.1/24 dev vboxnet0
+ip link set vboxnet0 up
+</pre>
+
+<p>Назначаем IP для второй сети</p>
+
+<pre class="bash">
+ip addr add 192.168.123.1/24 dev vboxnet1
+ip link set vboxnet1 up
+</pre>
+
+<h3> 1.3 Проверка доступности</h3>
+
+<p>Проверяем доступность сервера по обоим интерфейсам</p>
+
+<pre class="bash">
+ping -c 3 192.168.122.206
+ping -c 3 192.168.123.206
+</pre>
+
+<h3> 1.4 Установка пакетов</h3>
+
+<p><strong>На сервере:</strong></p>
+
+<pre class="bash">
+apt-get install scsitarget-utils
+</pre>
+
+<p><strong>На клиенте:</strong></p>
+
+<pre class="bash">
+apt-get install open-iscsi multipath-tools
+</pre>
+
+<hr/>
+
+
+
+<h2> Этап 2: Настройка iSCSI Target с двумя порталами</h2>
+
+<p><strong>Особенность scsitarget-utils:</strong> В отличие от
+<code>targetcli</code>, <code>tgtd</code> автоматически слушает на всех доступных
+IP-интерфейсах. Нет необходимости вручную создавать порталы — достаточно просто
+запустить сервис. Однако для наглядности и контроля доступа мы можем настроить
+несколько <code>initiator-address</code> для ограничения доступа.</p>
+
+<h3>2.1 Конфигурация Target</h3>
+
+<p><strong>На сервере</strong> отредактируем <code>/etc/tgt/targets.conf</code>:</p>
+
+<pre class="bash">
+nano /etc/tgt/targets.conf
+</pre>
+
+<p>Добавим следующую конфигурацию:</p>
+
+<pre class="text">
+&lt;target iqn.2025-04.com.example:multipath.disk1&gt;
+    # Базовое устройство хранения<
+    backing-store /srv/iscsi/disk1.img
+    
+    # Опции производительности
+    write-cache on
+    
+    # Разрешаем доступ с обоих IP клиента (опционально)
+    initiator-address 192.168.122.1
+    initiator-address 192.168.123.1
+&lt;/target&gt;
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Директива <code>initiator-address</code> может быть
+указана несколько раз для разных IP-адресов или подсетей . Также можно указать подсеть:
+<code>initiator-address 192.168.122.0/24</code>. По умолчанию <code>tgtd</code> слушает
+на всех интерфейсах, поэтому клиент сможет подключиться через любой IP сервера.
+</div>
+
+<h3>2.2 Запуск и проверка</h3>
+
+<p>Создаём образ диска (если ещё не создан)</p>
+
+<pre class="bash">
+mkdir -p /srv/iscsi
+dd if=/dev/zero of=/srv/iscsi/disk1.img bs=1M count=1024
+</pre>
+
+<p>Запускаем сервис</p>
+
+<pre class="bash">
+systemctl restart tgtd
+</pre>
+
+<p>Проверяем, что цель создана</p>
+
+<pre class="bash">
+tgt-admin --show
+</pre>
+
+<hr/>
+
+
+
+<h2>Этап 3: Обнаружение целей с двух интерфейсов</h2>
+
+<h3>3.1 Настройка клиента</h3>
+
+<p><strong>На клиенте:</strong></p>
+
+<p>Убеждаемся, что iscsid запущен</p>
+
+<pre class="bash">
+systemctl start iscsid
+</pre>
+
+<h3>3.2 Обнаружение целей через разные IP</h3>
+
+<p>Обнаружение через первый интерфейс сервера</p>
+
+<pre class="bash">
+iscsiadm -m discovery -t sendtargets -p 192.168.122.206
+</pre>
+
+<p>Обнаружение через второй интерфейс сервера</p>
+
+<pre class="bash">
+iscsiadm -m discovery -t sendtargets -p 192.168.123.206
+</pre>
+
+<h3>3.3 Проверка записей в базе данных</h3>
+
+<p>Просмотр всех обнаруженных целей</p>
+
+<pre class="bash">
+cat /etc/iscsi/nodes/iqn.2025-04.com.example:multipath.disk1/*/default
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong>  Теперь в базе данных open-iscsi есть две записи для
+одного и того же target, но с разными IP-адресами.
+</div>
+
+<h3>3.4 Подключение к цели</h3>
+
+<p>Подключаемся ко всем обнаруженным целям</p>
+
+<pre class="bash">
+iscsiadm -m node --login
+</pre>
+
+<div class="explanation">
+<strong>Важно:</strong> После выполнения этой команды должно установиться два
+соединения (две сессии) с одним и тем же target через разные IP-адреса.
+</div>
+
+<h3>3.5 Проверка подключения</h3>
+
+<p>Просмотр сессий</p>
+
+<pre class="bash">
+iscsiadm -m session
+</pre>
+
+<p>Более детальная информация (видим два соединения)</p>
+
+<pre class="bash">
+iscsiadm -m session -P 1
+</pre>
+
+<p>Просмотр блочных устройств</p>
+
+<pre class="bash">
+lsblk
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Сколько блочных устройств появилось? Почему их два, хотя
+у нас один LUN?</p>
+<p><strong>Пояснение:</strong> При подключении через два разных сетевых пути
+open-iscsi создаёт два независимых блочных устройства (например, <code>/dev/sda</code>
+и <code>/dev/sdb</code>), представляющих один и тот же удалённый диск. Multipath решает
+эту проблему, объединяя их в одно устройство.</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 4: Настройка Multipath</h2>
+
+<h3>4.1 Конфигурация multipath</h3>
+
+<p><strong>На клиенте:</strong></p>
+
+<p>Создаём конфигурационный файл</p>
+
+<pre class="text">
+cat &gt; /etc/multipath.conf &lt;&lt; 'EOF'
+defaults {
+    user_friendly_names yes
+    find_multipaths yes
+}
+
+blacklist {
+    devnode &quot;^(ram|raw|loop|fd|md|dm-|sr|scd|st)[0-9]*&quot;
+    devnode &quot;^hd[a-z]&quot;
+}
+
+devices {
+    device {
+        vendor &quot;IET&quot;
+        product &quot;VIRTUAL-DISK&quot;
+        path_grouping_policy multibus
+        path_checker tur
+        features &quot;0&quot;
+        hardware_handler &quot;0&quot;
+        prio const
+        failback immediate
+        rr_weight uniform
+        no_path_retry 5
+    }
+}
+EOF
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> В ALT Linux для работы multipath
+необходим этот файл конфигурации. Vendor
+<code>&quot;IET&quot;</code> —
+это идентификатор, который используется
+tgtd по умолчанию. Параметр <code>find_multipaths
+yes</code> облегчает обнаружение
+multipath устройств.
+</div>
+
+
+<h3>4.2 Запуск multipathd</h3>
+
+<p>Запускаем сервис</p>
+
+<pre class="bash">
+systemctl enable multipathd
+systemctl start multipathd
+</pre>
+
+<p>Проверяем статус</p>
+
+<pre class="bash">
+systemctl status multipathd
+</pre>
+
+<h3> 4.3 Обнаружение и проверка multipath устройств</h3>
+
+<p>Принудительное обнаружение мультипафа</p>
+
+<pre class="bash">
+multipath -v2
+</pre>
+
+<p>Просмотр карты устройств</p>
+
+<pre class="bash">
+multipath -ll
+</pre>
+
+<p>Вы должны увидеть одно multipath устройство, объединяющее оба пути.</p>
+
+<p>Пример вывода:</p>
+
+<pre class="text">
+mpatha (360000000000000000e00000000010001) dm-0 IET     ,VIRTUAL-DISK
+size=1.0G features='0' hwhandler='0' wp=rw
+`-+- policy='round-robin 0' prio=1 status=active
+  |- 3:0:0:1 sda 8:16 active ready running
+  `- 4:0:0:1 sdb 8:32 active ready running
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> <code>multipath</code> создаёт устройство
+<code>/dev/mapper/mpatha</code> (или <code>/dev/mapper/XXX</code>), которое представляет
+оба пути. При политике <code>round-robin</code> оба пути используются для балансировки нагрузки.
+</div>
+
+<h3>4.4 Форматирование и монтирование multipath устройства</h3>
+
+<p>Форматируем устройство из /dev/mapper/</p>
+
+<pre class="bash">
+mkfs.ext4 /dev/mapper/mpatha
+</pre>
+
+<p>Создаём точку монтирования</p>
+
+<pre class="bash">
+mkdir -p /mnt/multipath
+</pre>
+
+<p>Монтируем</p>
+
+<pre class="bash">
+mount /dev/mapper/mpatha /mnt/multipath
+</pre>
+
+<p>Проверяем</p>
+
+<pre class="bash">
+df -h /mnt/multipath
+</pre>
+
+<h3>4.5 Тестирование записи</h3>
+
+<p>Записываем тестовые данные</p>
+
+<pre class="bash">
+echo &quot;Multipath test data with scsitarget-utils&quot; &gt; /mnt/multipath/test.txt
+dd if=/dev/urandom of=/mnt/multipath/bigfile.dat bs=1M count=50
+</pre>
+
+<p>Проверяем</p>
+
+<pre class="bash">
+ls -la /mnt/multipath/
+</pre>
+
+<hr/>
+
+
+
+<h2>Этап 5: Тестирование отказоустойчивости</h2>
+
+<h3>5.1 Мониторинг активных путей</h3>
+
+<p><strong>На клиенте</strong> (в одном терминале):</p>
+
+<p>Запускаем непрерывный мониторинг</p>
+
+<pre class="bash">
+watch -n 1 multipath -ll
+</pre>
+
+<p><strong>На клиенте</strong> (в другом терминале):</p>
+
+<p>Запускаем непрерывную запись для имитации нагрузки</p>
+
+<pre class="bash">
+while true; do date &gt;&gt; /mnt/multipath/log.txt; sleep 0.1; done
+</pre>
+
+<h3>5.2 Симуляция отказа сетевого пути</h3>
+
+<p>Мы можем временно отключить один из интерфейсов на сервере или клиенте:</p>
+
+<p><strong>Вариант 1:</strong> На сервере (отключаем второй интерфейс)</p>
+
+<p>На сервере</p>
+
+<pre class="bash">
+ip link set eth1 down
+</pre>
+
+<p><strong>Вариант 2:</strong> На клиенте (отключаем второй интерфейс)</p>
+
+<p>На клиенте</p>
+
+<pre class="bash">
+ip link set vboxnet1 down
+</pre>
+
+<h3>5.3 Наблюдение за переключением</h3>
+
+<p>Следите за выводом <code>multipath -ll</code> в первом терминале. Один из путей должен
+перейти в состояние <code>faulty</code> или <code>failed</code>.</p>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Остановилась ли операция записи? Что произошло с
+multipath устройством?</p>
+<p><strong>Пояснение:</strong> Multipath автоматически переключает трафик на
+работающий путь.  Для приложения это происходит незаметно.  Время переключения зависит
+от настроек таймаутов.</p>
+</div>
+
+<h3>5.4 Восстановление отказавшего пути</h3>
+
+<p><strong>На сервере или клиенте</strong> (возвращаем интерфейс):</p>
+
+<p>Поднимаем интерфейс</p>
+
+<pre class="bash">
+ip link set eth1 up
+</pre>
+
+<p>Через несколько секунд путь должен восстановиться и стать активным снова.</p>
+
+<h3>5.5 Остановка тестовой записи</h3>
+
+<p>Используйте <code>Ctrl+C</code> в терминале с <code>while</code> циклом.</p>
+
+<p>Проверяем, что данные не потеряны</p>
+
+<pre class="bash">
+tail /mnt/multipath/log.txt
+</pre>
+
+<hr/>
+
+
+
+<h2>Этап 6: Настройка CHAP для двух путей</h2>
+
+<p>Если требуется настроить аутентификацию при использовании multipath, CHAP нужно
+сконфигурировать для каждого пути отдельно.</p>
+
+<h3>6.1 Настройка на сервере</h3>
+
+<p><strong>На сервере</strong> добавим CHAP в конфигурацию:</p>
+
+<pre class="bash">
+nano /etc/tgt/targets.conf
+</pre>
+
+<p>Добавим директиву <code>incominguser</code>:</p>
+
+<pre class="text">
+&lt;target iqn.2025-04.com.example:multipath.disk1&gt;
+    backing-store /srv/iscsi/disk1.img
+    write-cache on
+    initiator-address 192.168.122.1
+    initiator-address 192.168.123.1
+    incominguser multipath_user multipath_secret
+&lt;/target&gt;
+</pre>
+
+<p>Перезагружаем конфигурацию:</p>
+
+<pre class="bash">
+systemctl restart tgtd
+</pre>
+
+<h3>6.2 Настройка на клиенте</h3>
+
+<p><strong>На клиенте</strong> редактируем <code>/etc/iscsi/iscsid.conf</code>:</p>
+
+<pre class="bash">
+nano /etc/iscsi/iscsid.conf
+</pre>
+
+<p>Установите:</p>
+
+<pre class="text">
+node.session.auth.authmethod = CHAP
+node.session.auth.username = multipath_user
+node.session.auth.password = multipath_secret
+
+discovery.sendtargets.auth.authmethod = CHAP
+discovery.sendtargets.auth.username = multipath_user
+discovery.sendtargets.auth.password = multipath_secret
+</pre>
+
+<p>Затем переподключитесь:</p>
+
+<pre class="bash">
+iscsiadm -m node --logout
+iscsiadm -m discovery -t sendtargets -p 192.168.122.206
+iscsiadm -m discovery -t sendtargets -p 192.168.123.206
+iscsiadm -m node --login
+</pre>
+
+<p>После этого multipath должен работать с аутентификацией.</p>
+
+<hr/>
+
+
+
+<h2>Этап 7: Очистка</h2>
+
+<h3>На клиенте:</h3>
+
+<p>Размонтируем</p>
+
+<pre class="bash">
+umount /mnt/multipath
+</pre>
+
+<p>Отключаем multipath устройство</p>
+
+<pre class="bash">
+multipath -f mpatha
+</pre>
+
+<p>Останавливаем multipathd</p>
+
+<pre class="bash">
+systemctl stop multipathd
+</pre>
+
+<p>Отключаем iSCSI сессии</p>
+
+<pre class="bash">
+iscsiadm -m node --logout
+</pre>
+
+<p>Удаляем цели из базы</p>
+
+<pre class="bash">
+iscsiadm -m node -p 192.168.122.206 -o delete
+iscsiadm -m node -p 192.168.123.206 -o delete
+</pre>
+
+<p>Удаляем конфигурацию multipath</p>
+
+<pre class="bash">
+rm -f /etc/multipath.conf
+</pre>
+
+<h3>На сервере:</h3>
+
+<p>Останавливаем сервис</p>
+
+<pre class="bash">
+systemctl stop tgtd
+</pre>
+
+<p>Удаляем образ диска</p>
+
+<pre class="bash">
+rm -f /srv/iscsi/disk1.img
+</pre>
+
+<hr/>
+
+
+
+<h2>Контрольные вопросы</h2>
+<ol>
+	<li>Как в <code>scsitarget-utils</code> настроить доступ к Target с нескольких
+		IP-адресов?</li>
+	<li>Почему при подключении к одному LUN через два IP появляется два блочных
+		устройства?</li>
+	<li>Какую проблему решает multipath?</li>
+	<li>В чём разница между политиками <code>multibus</code> и <code>failover</code>
+		в конфигурации multipath?</li>
+	<li>Как проверить, сколько активных путей у multipath устройства?</li>
+	<li>Что происходит с data path при отказе одного из сетевых интерфейсов?</li>
+	<li>Как настраивается CHAP при использовании multipath в
+		<code>scsitarget-utils</code>>?</li>
+	<li>Что означает параметр <code>no_path_retry 5</code> в конфигурации multipath?</li>
+	<li>Какое преимущество даёт использование <code>scsitarget-utils</code> по сравнению
+		с <code>targetcli</code> в контексте MPIO?</li>
+	<li>Как добавить третий сетевой путь без перерыва в работе?</li>
+</ol>
+
+<hr/>
+
+
+
+<h2>Выводы</h2>
+
+<ul>
+	<li>Для отказоустойчивости iSCSI необходимо настроить два независимых сетевых пути
+		между Target и Initiator.</li>
+	<li><code>scsitarget-utils</code> (демон <code>tgtd</code>) автоматически слушает на
+		всех доступных IP-интерфейсах сервера, что упрощает настройку MPIO.</li>
+	<li>При подключении к одному LUN через два пути open-iscsi создаёт два блочных
+		устройства.</li>
+	<li>Multipath (пакет <code>multipath-tools</code>) объединяет эти устройства в одно,
+		обеспечивая отказоустойчивость и балансировку нагрузки.</li>
+	<li>В ALT Linux конфигурация multipath задаётся в
+		<code>/etc/multipath.conf</code>.</li>
+	<li>CHAP-аутентификацию можно (и нужно) использовать вместе с multipath, добавляя
+		директиву <code>incominguser</code> в <code>/etc/tgt/targets.conf</code>.</li>
+</ul>
+
+<hr/>
+
+</body>
+</html>

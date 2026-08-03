@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="ru-RU">
+
+  <head>
+    <title>SHD</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="shd.css">
+  </head>
+
+<body>
+
+<h1> Лабораторная работа: Знакомство с ZFS.</h1>
+
+<p><strong>Тема:</strong> Создание пулов ZFS, работа с dataset'ами, снапшотами и понимание
+особенностей CoW-архитектуры.</p>
+
+<p><strong>Цель работы:</strong> На практике освоить основные команды ZFS,
+понять разницу между пулом и dataset, научиться создавать снапшоты и
+откатываться к ним, а также разобраться, почему <code class="cmd">df</code> может вводить
+в заблуждение.</p>
+
+<hr/>
+
+
+
+<h2>Подготовка</h2>
+
+<p><strong>Переключение в режим администратора</strong></p>
+
+<pre class="bash">
+su -
+</pre>
+
+<div class="explanation">
+Дальнейшие команды выполняются от имени root. Будьте внимательны
+— вы работаете с привилегированным доступом.
+</div>
+
+<p><strong>Установка ZFS</strong></p>
+
+<pre class="bash">
+apt-get update
+apt-get install zfs-utils kernel-module-zfs
+</pre>
+
+<div class="explanation">
+ZFS состоит из двух частей — пользовательских утилит (<code>zfs</code>,
+<code>zpool</code>) и модуля ядра. Обе необходимо установить.
+</div>
+
+<p><strong>Загрузка модуля ядра</strong></p>
+
+<pre class="bash">
+modprobe zfs
+</pre>
+
+<div class="explanation">
+Модуль ядра можно загрузить командой <code class="cmd">modprobe</code>.
+Убедиться, что он загружен, можно командой <code class="cmd">lsmod | grep zfs</code>.
+</div>
+
+<p><strong>Создание loop-устройств для имитации дисков</strong></p>
+
+<p>Очищаем предыдущие назначения</p>
+
+<pre class="bash">
+losetup -D
+</pre>
+
+<p>Создаём 5 файлов-образов по 500 МБ каждый и назначаем их loop-устройствам</p>
+<pre class="bash">
+cd ~
+mkdir zfs_lab
+cd zfs_lab
+for i in {1..5}; do dd if=/dev/zero of=disk$i.img bs=1M count=500; losetup /dev/loop$i ./disk$i.img; done
+</pre>
+
+<p>Проверяем, что получилось</p>
+<pre class="bash">
+lsblk | grep loop
+</pre>
+
+<div class="explanation">
+Мы создали 5 виртуальных дисков по 500 МБ каждый. Они будут отображаться в системе
+как <code>/dev/loop1 ... /dev/loop5</code>.
+</div>
+
+<hr/>
+
+<h2>Этап 1: Создание пула ZFS</h2>
+
+<h3>1.1 Создание простого пула из одного диска</h3>
+
+<pre class="bash">
+zpool create mypool /dev/loop1
+</pre>
+
+<p>Посмотрим, что появилось</p>
+
+<pre class="bash">
+zpool list
+zfs list
+df -h
+ls -la /mypool
+</pre>
+
+<div class="explanation">
+Команда <code class="cmd">zpool create</code> сделала несколько вещей:
+<ol>
+	<li>Создала пул с именем <code>mypool</code>.</li>
+	<li>Автоматически создала <code>dataset</code> с тем же именем.</li>
+	<li>Смонтировала этот dataset в <code>/mypool</code>.</li>
+</ol>
+</div>
+
+<h3>1.2 Создание зеркала (mirror).</h3>
+<p>Удалим предыдущий пул и создадим зеркало из двух дисков.</p>
+
+<p>Удаляем пул</p>
+
+<pre class="bash">
+zpool destroy mypool
+</pre>
+
+<p>Проверяем, что пул исчез</p>
+
+<pre class="bash">
+zpool list
+</pre>
+
+<p>Создаём зеркало из loop1 и loop2</p>
+
+<pre class="bash">
+zpool create mirpool mirror /dev/loop1 /dev/loop2
+</pre>
+
+<div class="explanation">
+Вопрос: Какой полезный объём у пула <code>mirpool</code>, если каждый диск по 500 МБ?
+</div>
+
+<p>Проверяем</p>
+
+<pre class="bash">
+zpool list mirpool
+df -h /mirpool
+</pre>
+
+<div class="explanation">
+В зеркале из двух дисков полезный объём равен объёму одного диска
+(около 480 МБ с учётом служебной информации). Второй диск — точная копия первого.
+</div>
+
+<h3>1.3 Создание RAID-Z (аналог RAID5)</h3>
+
+<pre class="bash">
+zpool destroy mirpool
+zpool create rzpool raidz /dev/loop1 /dev/loop2 /dev/loop3
+zpool list rzpool
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Сколько полезного места в RAID-Z из трёх дисков по 500 МБ? Почему не 1.5 ГБ и не 1.0 ГБ?</p>
+<p><strong>Пояснение:</strong> В RAID-Z из трёх дисков один диск уходит под чётность. Полезный объём примерно равен сумме двух дисков (около 960 МБ).</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 2: Dataset'ы и их свойства</h2>
+
+<h3>2.1 Создание dataset'ов</h3>
+<p>Dataset — это файловая система внутри пула. Она ведёт себя как отдельный
+раздел, но использует общее пространство пула.</p>
+
+<p>Создаём несколько dataset'ов внутри rzpool</p>
+
+<pre class="bash">
+zfs create rzpool/documents
+zfs create rzpool/music
+zfs create rzpool/backup
+</pre>
+
+<p>Проверяем</p>
+
+<pre class="bash">
+zfs list
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Где физически находятся эти три dataset'а?
+Они занимают отдельное место на дисках?</p>
+<p><strong>Пояснение:</strong> Dataset'ы — это не отдельные разделы, а просто
+разные &quot;папки&quot; с общим пулом пространства. Они делят всё свободное место в пуле.</p>
+</div>
+
+<h3>2.2 Включение сжатия</h3>
+
+<p>Включаем сжатие lz4 для dataset'а documents</p>
+
+<pre class="bash">
+zfs set compression=lz4 rzpool/documents
+zfs get compression rzpool/documents
+</pre>
+
+<p>Создаём файл с повторяющимся содержимым (хорошо сжимается)</p>
+
+<pre class="bash">
+dd if=/dev/zero of=/rzpool/documents/zeros.dat bs=1M count=50
+</pre>
+
+<p>Смотрим, сколько места реально заняло</p>
+
+<pre class="bash">
+ls -lh /rzpool/documents/zeros.dat
+zfs list rzpool/documents
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Почему файл размером 50 МБ занимает на диске всего
+несколько мегабайт? Где &quot;спрятались&quot; остальные байты?</p>
+
+<p><strong>Пояснение:</strong> Сжатие lz4 работает в реальном времени. Данные
+сжимаются перед записью на диск. Файл, заполненный нулями, сжимается почти до нуля.</p>
+</div>
+
+<h3>2.3 Настройка квоты</h3>
+
+<p>Устанавливаем квоту 100 МБ на dataset backup</p>
+
+<pre class="bash">
+zfs set quota=100M rzpool/backup
+zfs get quota rzpool/backup
+</pre>
+
+<p>Пытаемся записать больше квоты</p>
+
+<pre class="bash">
+dd if=/dev/urandom of=/rzpool/backup/bigfile bs=1M count=150
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Что произошло? Почему запись прервалась?</p>
+<p><strong>Пояснение:</strong> Квота ограничивает максимальный размер
+dataset'а. При попытке превысить квоту операция записи завершается ошибкой
+&quot;Disk quota exceeded&quot;.</p>
+</div>
+
+<p>Пытаемся записать больше квоты по другому</p>
+
+<pre class="bash">
+rm /rzpool/backup/bigfile
+dd if=/dev/zero of=/rzpool/backup/bigfile bs=1M count=150
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Что произошло сейчас? Почему запись не прервалась по квоте?</p>
+<p><strong>Пояснение:</strong> Квота в ZFS ограничивает <strong>логический
+размер данных</strong> после сжатия и дедупликации, а <code>dd</code> пишет <strong>
+физические нули</strong>, которые ZFS сжимает почти в ничто.</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 3: Снапшоты и откат</h2>
+
+<h3>3.1 Создание снапшота</h3>
+
+<p>Снапшот — это &quot;мгновенный снимок&quot; состояния файловой системы.</p>
+
+<p>Создаём тестовые файлы в dataset documents</p>
+
+<pre class="bash">
+echo &quot;Важный документ&quot; &gt; /rzpool/documents/important.txt
+echo &quot;Секретные данные&quot; &gt; /rzpool/documents/secret.txt
+</pre>
+
+<p>Создаём снапшот</p>
+
+<pre class="bash">
+zfs snapshot rzpool/documents@before_changes
+zfs list -t snapshot
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Сколько места занял снапшот? (Подсказка:
+посмотрите в <code class="cmd">zfs list</code> поле <code>USED</code> для снапшота)</p>
+<p><strong>Пояснение:</strong> Снапшот в момент создания не занимает места.
+Он просто &quot;запоминает&quot;, какие блоки данных принадлежат текущему состоянию.
+Место начнёт заниматься, когда данные будут меняться.</p>
+</div>
+
+
+<h3>3.2 Изменение данных и наблюдение за ростом снапшота</h3>
+
+<p>Модифицируем существующий файл</p>
+
+<pre class="bash">
+echo &quot;Дополнительная строка&quot; &gt;&gt; /rzpool/documents/important.txt
+</pre>
+
+<p>Создаём новый файл</p>
+
+<pre class="bash">
+echo &quot;Новый файл&quot; &gt; /rzpool/documents/newfile.txt
+</pre>
+
+<p>Удаляем один файл</p>
+
+<pre class="bash">
+rm /rzpool/documents/secret.txt
+</pre>
+
+<p>Смотрим, как изменился снапшот</p>
+
+<pre class="bash">
+zfs list -t snapshot
+zfs list rzpool/documents
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Почему снапшот теперь занимает место? Какие блоки
+&quot;заморожены&quot; в снапшоте?</p>
+<p><strong>Пояснение:</strong> При изменении или удалении файлов ZFS не трогает
+старые блоки — они сохраняются для снапшота. Снапшот начинает занимать ровно столько
+места, сколько занимали изменённые или удалённые данные.</p>
+</div>
+
+<h3>3.3 Откат к снапшоту</h3>
+
+<p>Посмотрим текущее содержимое</p>
+
+<pre class="bash">
+ls -la /rzpool/documents/
+</pre>
+
+<p>Откатываемся к состоянию снапшота</p>
+
+<pre class="bash">
+zfs rollback rzpool/documents@before_changes
+</pre>
+
+<p>Проверяем, что вернулось</p>
+
+<pre class="bash">
+ls -la /rzpool/documents/
+cat /rzpool/documents/important.txt
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Что произошло с файлами <code>newfile.txt</code> и
+<code>secret.txt</code>? Почему <code>important.txt</code> вернул исходное содержимое?</p>
+<p><strong>Пояснение:</strong> <code>zfs rollback</code> возвращает файловую
+систему в точности к состоянию на момент создания снапшота. Все изменения, сделанные
+после снапшота, безвозвратно теряются.</p>
+</div>
+
+<hr/>
+
+<h2>Этап 4: Иллюзия свободного места — почему <code class="cmd">df</code> врёт</h2>
+
+<h3>4.1 Создание ситуации, когда <code class="cmd">df</code> показывает не то, что есть</h3>
+
+<p>Создаём новый dataset без квоты</p>
+
+<pre class="bash">
+zfs create rzpool/test
+</pre>
+
+<p>Записываем в него данные</p>
+
+<pre class="bash">
+dd if=/dev/urandom of=/rzpool/test/data1.dat bs=1M count=200
+dd if=/dev/urandom of=/rzpool/test/data2.dat bs=1M count=200
+</pre>
+
+<p>Смотрим, что показывает df</p>
+
+<pre class="bash">
+df -h /rzpool/test
+zfs list rzpool/test
+</pre>
+
+<div class="explanation">
+<strong>Вопрос:</strong> Цифры совпадают? Если нет, то почему?
+</div>
+
+<h3>4.2 Создание снапшотов, которые &quot;съедают&quot; место незаметно</h3>
+
+<p>Создаём серию снапшотов</p>
+
+<pre class="bash">
+zfs snapshot rzpool/test@snap1
+dd if=/dev/urandom of=/rzpool/test/data3.dat bs=1M count=100
+
+zfs snapshot rzpool/test@snap2
+rm /rzpool/test/data1.dat
+
+zfs snapshot rzpool/test@snap3
+dd if=/dev/urandom of=/rzpool/test/data4.dat bs=1M count=150
+</pre>
+
+<p>Теперь смотрим</p>
+
+<pre class="bash">
+df -h /rzpool/test
+zfs list -t all rzpool/test
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Почему <code class="cmd">df</code> показывает,
+что свободно 150 МБ, а <code class="cmd">zfs list</code> говорит, что занято уже
+почти всё? Куда делось место?</p>
+<p><strong>Пояснение:</strong> <code class="cmd">df</code> показывает свободное
+место в текущем состоянии dataset'а. Но снапшоты держат старые версии файлов! В сумме
+данные + снапшоты занимают гораздо больше места, чем видит <code class="cmd">df</code>.
+Это классическая &quot;ловушка&quot; ZFS — место может закончиться внезапно, если забыть
+про снапшоты.</p>
+</div>
+
+<h3>4.3 Удаление снапшотов и освобождение места</h3>
+
+<p>Удаляем снапшоты по одному и наблюдаем</p>
+
+<pre class="bash">
+zfs destroy rzpool/test@snap1
+zpool list rzpool
+
+zfs destroy rzpool/test@snap2
+zpool list rzpool
+
+zfs destroy rzpool/test@snap3
+zpool list rzpool
+</pre>
+
+<p>Финальная проверка</p>
+
+<pre class="bash">
+zfs list rzpool/test
+df -h /rzpool/test
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Только после удаления всех
+снапшотов, ссылающихся на старые блоки,
+место действительно освобождается.
+<code class="cmd">zpool list</code> показывает
+реальную картину использования пула.
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 5: Демонстрация невозможности расширить RAID-Z добавлением диска</h2>
+
+<h3>5.1 Создание RAID-Z и попытка расширения</h3>
+
+<p>Создаём RAID-Z из трёх дисков</p>
+
+<pre class="bash">
+zpool destroy rzpool
+zpool create rzexp raidz /dev/loop1 /dev/loop2 /dev/loop3
+zpool list rzexp
+zfs list rzexp<
+</pre>
+
+<h3>5.2 Попытка добавить диск</h3>
+
+<p>Пытаемся добавить четвёртый диск в пул</p>
+
+<pre class="bash">
+zpool add rzexp /dev/loop4
+</pre>
+
+<p>Диск не добавился, но ZFS сообщила, что его можно добавить принудительно.</p>
+
+<pre class="bash">
+zpool add -f rzexp /dev/loop4
+</pre>
+
+<p>Диск добавился! Но увеличился ли полезный объём?</p>
+
+<pre class="bash">
+zpool list rzexp
+</pre>
+
+<p>Полезный объём кажется увеличился, но все ли у нас хорошо?</p>
+
+<pre class="bash">
+zpool status rzexp
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Что показывает <code class="cmd">zpool
+status</code>? Какой тип у нового <code>vdev</code>?</p>
+<p><strong>Пояснение:</strong> Добавленный диск <code>/dev/loop4</code>
+стал отдельным vdev типа <code>single</code> (одиночный диск без избыточности). Он
+не объединился с существующим RAID-Z. В ZFS нельзя просто так расширить RAID-Z
+добавлением диска — можно только добавить ещё один RAID-Z vdev (что потребует
+3 новых диска) или заменить все существующие диски на более ёмкие.</p>
+</div>
+
+<p>Попробуем отключить добавленный диск</p>
+
+<pre class="bash">
+zpool remove rzexp /dev/loop4
+</pre>
+
+<p>«Все, приплыли!» vdev удалить нельзя.<br/>
+Вывод: флагом -f стоит пользоваться с огромной осторожностью.</p>
+
+
+<h3>5.3 Правильный способ: замена дисков на более ёмкие</h3>
+
+<p>Удалим «испорченый пул» и приготовим loop-устройства большего объема</p>
+
+<pre class="bash">
+zpool destroy  rzexp
+losetup -d /dev/loop5
+losetup -d /dev/loop4
+for i in {4..6}; do dd if=/dev/zero of=disk$i.img bs=1M count=800; done
+</pre>
+
+<p>Проверяем что вышло</p>
+
+<pre class="bash">
+lsblk | grep loop
+</pre>
+
+<p>Пересоздадим pool rzexp</p>
+
+<pre class="bash">
+zpool create rzexp raidz /dev/loop1 /dev/loop2 /dev/loop3
+</pre>
+
+<p>Проверяем что получилось</p>
+
+<pre class="bash">
+zpool list rzexp
+</pre>
+
+<p>Заменяем дисками большего размера</p>
+
+<pre class="bash">
+zpool replace rzexp /dev/loop1 /dev/loop4
+zpool replace rzexp /dev/loop2 /dev/loop5
+zpool replace rzexp /dev/loop3 /dev/loop6
+
+zpool online -e rzexp /dev/loop4
+zpool online -e rzexp /dev/loop5
+zpool online -e rzexp /dev/loop6
+</pre>
+
+<p>Проверяем что получилось</p>
+
+<pre class="bash">
+zpool list rzexp
+</pre>
+
+<div class="explanation">
+<strong>Пояснение:</strong> Единственный способ увеличить ёмкость RAID-Z —
+заменить все диски по одному на диски большего размера. После замены каждого диска
+пул перестраивается (resilver), и после замены всех дисков объём автоматически увеличивается.
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 6: Очистка</h2>
+
+<p>Отключаем пулы </p>
+
+<pre class="bash">
+zpool destroy rzexp
+</pre>
+
+<p>Отключаем loop-устройства</p>
+
+<pre class="bash">
+losetup -D
+</pre>
+
+<p>Удаляем файлы-образы</p>
+
+<pre class="bash">
+rm -f disk*.img
+</pre>
+
+<p>Проверяем, что всё чисто</p>
+
+<pre class="bash">
+zpool list
+lsblk | grep loop
+</pre>
+
+<hr/>
+
+
+
+<h2>Контрольные вопросы</h2>
+
+<ol>
+	<li>В чём разница между пулом (zpool) и dataset'ом (zfs)?</li>
+	<li>Почему при создании снапшота он не занимает места, а потом начинает занимать?</li>
+	<li>Какая команда показывает реальное занятое место в пуле, а не в отдельном dataset?</li>
+	<li>Почему <code class="cmd">df</code> может показывать 50% свободного места,
+		а запись данных внезапно прекращается?</li>
+	<li>Можно ли добавить один диск в RAID-Z и увеличить его ёмкость? Почему?</li>
+	<li>Как работает сжатие в ZFS и почему файл из нулей занимает почти ноль места?</li>
+	<li>Что произойдёт с данными, если выполнить <code class="cmd">zfs
+		rollback</code> к старому снапшоту?</li>
+</ol>
+
+<hr/>
+
+
+
+<h2>Выводы</h2>
+<ul>
+	<li>ZFS объединяет управление томами и файловой системой в одном инструменте.</li>
+	<li>Пул — это набор дисков. Dataset — файловая система внутри пула.</li>
+	<li>Снапшоты в ZFS мгновенны и сначала не занимают места.</li>
+	<li><code class="cmd">df</code> может вводить в заблуждение — используйте
+		<code class="cmd">zfs list</code> и <code class="cmd">zpool list</code>.</li>
+	<li>RAID-Z нельзя расширить добавлением одного диска — только заменой всех
+		дисков на более ёмкие или добавлением нового RAID-Z vdev.</li>
+	<li>Сжатие работает в реальном времени и особенно эффективно для текста и нулей.</li>
+</ul>
+
+<hr/>
+
+</body>
+</html>

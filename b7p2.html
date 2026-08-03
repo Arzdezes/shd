@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="ru-RU">
+
+  <head>
+    <title>SHD</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="shd.css">
+  </head>
+
+<body>
+
+<h1>Лабораторная работа №2: Масштабирование S3-кластера MinIO</h1>
+
+<p><strong>Тема:</strong> Горизонтальное масштабирование объектного хранилища,
+отказоустойчивость и Erasure Coding в распределённом кластере MinIO.</p>
+
+<p><strong>Цель работы:</strong> Продемонстрировать легкость горизонтального масштабирования
+S3-совместимого хранилища путём добавления новых серверов в кластер, изучить
+механизмы отказоустойчивости (Erasure Coding) и убедиться, что данные остаются
+доступными при отказе узлов.</p>
+
+<p><strong>Топология:</strong></p>
+<ul>
+	<li><strong>MinIO Server 1:</strong> ALT Server 11 (ВМ1) — 192.168.56.108</li>
+	<li><strong>MinIO Server 2:</strong> ALT Server 11 (ВМ2) —
+		192.168.56.109 (клон ВМ1)</li>
+	<li><strong>MinIO Server 3:</strong> ALT Server 11 (ВМ3) —
+		192.168.56.110 (клон ВМ1)</li>
+	<li><strong>Клиент:</strong> ALT Workstation (хост) —
+	192.168.56.1</li>
+</ul>
+
+<p><strong>Особенности сетевой настройки:</strong><br/>
+В лабораторной среде VirtualBox используется сеть типа <code>&quot;Внутренняя сеть&quot; /
+&quot;Host-Only&quot;</code> с диапазоном <code>192.168.56.0/24</code>. DHCP в этой сети
+выдаёт адреса ВМ последовательно.</p>
+
+<hr/>
+
+
+
+<h2>Подготовка</h2>
+
+
+<div class="warning">
+<strong>Важно:</strong> Для выполнения команд с правами администратора
+мы будем использовать <code class="cmd">su -</code>.<br/>
+Переключитесь в режим root на обеих машинах.
+</div>
+
+<h3>1.1 Клонирование и подготовка серверов</h3>
+
+<p>Перед началом работы создайте два клона первой виртуальной машины (с уже установленным
+Docker и настроенным MinIO). После клонирования измените сетевые настройки на каждой ВМ:</p>
+
+<p><strong>На ВМ2 (клон 1):</strong></p>
+
+<pre class="bash">
+su -
+</pre>
+
+<p>Меняем IP-адрес</p>
+
+<pre class="bash">
+nano /etc/net/ifaces/eth0/ipv4address
+</pre>
+
+<p>Меняем 192.168.56.108 на 192.168.56.109</p>
+
+<p>Перезапускаем сеть</p>
+
+<pre class="bash">
+systemctl restart network
+</pre>
+
+<p>Проверяем</p>
+
+<pre class="bash">
+ip a | grep 192.168.56
+</pre>
+
+
+<p><strong>На ВМ3 (клон 2):</strong></p>
+
+<pre class="bash">
+su -
+</pre>
+
+<p>Меняем IP-адрес</p>
+
+<pre class="bash">
+nano /etc/net/ifaces/eth0/ipv4address
+</pre>
+
+<p>Меняем 192.168.56.108 на 192.168.56.110</p>
+
+<p>Перезапускаем сеть</p>
+
+<pre class="bash">
+systemctl restart network
+</pre>
+
+<p>Проверяем</p>
+
+<pre class="bash">
+ip a | grep 192.168.56
+</pre>
+
+<p class="explanation">
+<strong>Пояснение:</strong> Клонирование ВМ — это и есть демонстрация лёгкости
+масштабирования в виртуальной среде. За несколько минут мы получаем новые серверы,
+готовые войти в кластер. Важно, чтобы все серверы были в одной сети и видели друг друга.</p>
+
+<h3>1.2 Проверка сетевого взаимодействия</h3>
+
+<p><strong>На клиенте (ALT Workstation):</strong></p>
+
+<pre class="bash">
+su -
+ping -c 3 192.168.56.108
+ping -c 3 192.168.56.109
+ping -c 3 192.168.56.110
+</pre>
+
+<p><strong>С каждого сервера (проверка между собой):</strong></p>
+
+<p>На ВМ1</p>
+
+<pre class="bash">
+ping -c 3 192.168.56.109
+ping -c 3 192.168.56.110
+</pre>
+
+<p class="explanation">
+<strong>Пояснение:</strong> Все серверы должны видеть друг друга по сети. Это критически важно
+для формирования кластера.</p>
+
+<h3>1.3 Остановка существующих контейнеров и подготовка дисков</h3>
+
+<p><strong>На каждом сервере (ВМ1, ВМ2, ВМ3):</strong></p>
+
+<p>Останавливаем и удаляем существующий контейнер (если запущен)</p>
+
+<pre class="bash">
+docker stop minio-server 2&gt;/dev/null
+docker rm minio-server 2&gt;/dev/null
+</pre>
+
+<p>Создаём директории для данных (по 4 на каждом сервере)</p>
+
+<pre class="bash">
+mkdir -p /data/minio/disk{1,2,3,4}
+</pre>
+
+<p class="explanation">
+<strong>Пояснение:</strong> Для демонстрации Erasure Coding на каждом сервере нужно
+несколько дисков (или их эмуляций). MinIO рекомендует использовать как минимум 4 диска на сервер
+для оптимальной конфигурации.  У нас будет 3 сервера × 4 диска = 12 дисков в кластере.</p>
+
+<hr/>
+
+
+
+<h2>Этап 2: Запуск распределённого кластера MinIO</h2>
+
+<h3>2.1 Запуск кластера на всех серверах</h3>
+
+<p><strong>На ВМ1 (192.168.56.108):</strong></p>
+
+<pre class="bash">
+docker run -d \
+  --name minio-server \
+  --restart unless-stopped \
+  -p 9000:9000 \
+  -p 9001:9001 \
+  -v /data/minio/disk1:/data/disk1 \
+  -v /data/minio/disk2:/data/disk2 \
+  -v /data/minio/disk3:/data/disk3 \
+  -v /data/minio/disk4:/data/disk4 \
+  -e &quot;MINIO_ROOT_USER=minioadmin&quot; \
+  -e &quot;MINIO_ROOT_PASSWORD=minioadmin123&quot; \
+  quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z \
+  server --console-address &quot;:9001&quot; \
+  http://192.168.56.108/data/disk{1...4} \
+  http://192.168.56.109/data/disk{1...4} \
+  http://192.168.56.110/data/disk{1...4}
+</pre>
+
+<p><strong>На ВМ2 (192.168.56.109) — абсолютно такая же команда:</strong></p>
+
+<pre class="bash">
+docker run -d \
+  --name minio-server \
+  --restart unless-stopped \
+  -p 9000:9000 \
+  -p 9001:9001 \
+  -v /data/minio/disk1:/data/disk1 \
+  -v /data/minio/disk2:/data/disk2 \
+  -v /data/minio/disk3:/data/disk3 \
+  -v /data/minio/disk4:/data/disk4 \
+  -e &quot;MINIO_ROOT_USER=minioadmin&quot; \
+  -e &quot;MINIO_ROOT_PASSWORD=minioadmin123&quot; \
+  quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z \
+  server --console-address &quot;:9001&quot; \
+  http://192.168.56.108/data/disk{1...4} \
+  http://192.168.56.109/data/disk{1...4} \
+  http://192.168.56.110/data/disk{1...4}
+</pre>
+
+<p><strong>На ВМ3 (192.168.56.110) — абсолютно такая же команда:</strong></p>
+
+<pre class="bash">
+docker run -d \
+  --name minio-server \
+  --restart unless-stopped \
+  -p 9000:9000 \
+  -p 9001:9001 \
+  -v /data/minio/disk1:/data/disk1 \
+  -v /data/minio/disk2:/data/disk2 \
+  -v /data/minio/disk3:/data/disk3 \
+  -v /data/minio/disk4:/data/disk4 \
+  -e &quot;MINIO_ROOT_USER=minioadmin&quot; \
+  -e &quot;MINIO_ROOT_PASSWORD=minioadmin123&quot; \
+  quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z \
+  server --console-address &quot;:9001&quot; \
+  http://192.168.56.108/data/disk{1...4} \
+  http://192.168.56.109/data/disk{1...4} \
+  http://192.168.56.110/data/disk{1...4}
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Что произойдёт, если запустить только один сервер с
+такой командой? Почему MinIO требует, чтобы все серверы кластера были указаны при запуске?</p>
+
+<p><strong>Пояснение:</strong> MinIO использует протокол консенсуса для координации
+состояния кластера. При запуске все узлы должны знать друг о друге. Это позволяет
+автоматически формировать кластер без дополнительных серверов управления. В
+production окружении рекомендуется использовать как минимум 4 сервера для отказоустойчивости .</p>
+</div>
+
+<h3>2.2 Проверка статуса кластера</h3>
+
+<p><strong>На клиенте (ALT Workstation):</strong></p>
+
+<p>Настраиваем клиент (если не настроен в первой работе)</p>
+
+<pre class="bash">
+mcli alias set mycluster http://192.168.56.108:9000 minioadmin minioadmin123
+</pre>
+
+<p>Проверяем информацию о кластере</p>
+
+<pre class="bash">
+mcli admin info mycluster
+</pre>
+
+<p>Детальная информация о дисках</p>
+
+<pre class="bash">
+mcli admin info mycluster --json | grep -E &quot;endpoint|state&quot;
+</pre>
+
+<p><strong>Ожидаемый результат:</strong> Должны отображаться три сервера, каждый с
+4 дисками. Всего 12 дисков в кластере. Статус всех дисков — <code>online</code>.</p>
+
+<hr/>
+
+
+
+<h2>Этап 3: Erasure Coding в действии — загрузка данных и отказоустойчивость</h2>
+
+<h3>3.1 Загрузка тестовых данных</h3>
+
+<p><strong>На клиенте (ALT Workstation):</strong></p>
+
+<p>Создаём тестовый файл (50 МБ)</p>
+
+<pre class="bash">
+dd if=/dev/urandom of=largefile.dat bs=1M count=50
+</pre>
+
+<p>Создаём бакет</p>
+
+<pre class="bash">
+mcli mb mycluster/test-bucket
+</pre>
+
+<p>Загружаем файл</p>
+
+<pre class="bash">
+mcli cp largefile.dat mycluster/test-bucket/
+</pre>
+
+<p>Проверяем, что файл загружен</p>
+
+<pre class="bash">
+mcli ls mycluster/test-bucket/
+</pre>
+
+<h3>3.2 Понимание Erasure Code (EC) схемы</h3>
+
+<p>При 12 дисках (3 сервера × 4 диска) MinIO автоматически применяет схему Erasure Code.
+Стандартная схема для 12 дисков — <code>EC:8</code> (8 шардов данных, 4 шарда чётности)
+или <code>EC:6</code> в зависимости от версии.</p>
+
+<p>Просмотр информации о пуле (EC схема)</p>
+
+<pre class="bash">
+mcli admin info mycluster
+</pre>
+
+<p>Более детальная информация о дисках</p>
+
+<pre class="bash">
+mcli admin heal mycluster --verbose
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> При схеме EC:8 сколько дисков может выйти из строя без
+потери данных? Почему это эффективнее, чем 3-кратная репликация?</p>
+
+<p><strong>Пояснение:</strong> Erasure Code разбивает каждый объект на <code>n</code>
+шардов данных и <code>m</code> шардов чётности. При <code>EC:8</code> из 12 дисков 8 отведены
+под данные, 4 под чётность. Восстановление возможно при наличии любых 8 из 12 шардов. Значит,
+кластер может пережить отказ до 4 дисков (причём эти диски могут находиться на одном или
+разных серверах).</p>
+</div>
+
+<h3>3.3 Симуляция отказа одного сервера</h3>
+
+<p><strong>На ВМ2</strong> (останавливаем контейнер):</p>
+
+<pre class="bash">
+docker stop minio-server
+</pre>
+
+<p><strong>На клиенте</strong> (проверяем доступность данных):</p>
+
+<p>Просмотр файлов (должен работать)</p>
+
+<pre class="bash">
+mcli ls mycluster/test-bucket/
+</pre>
+
+<p>Скачивание файла (должно работать)</p>
+
+<pre class="bash">
+mcli cp mycluster/test-bucket/largefile.dat restored-file.dat
+</pre>
+
+<p>Сверяем контрольную сумму</p>
+
+<pre class="bash">
+md5sum largefile.dat restored-file.dat
+</pre>
+
+<p>Проверяем статус кластера (один сервер offline)</p>
+
+<pre class="bash">
+mcli admin info mycluster
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Работает ли доступ к данным? Сколько серверов осталось в
+кластере? Почему данные остались доступны?</p>
+
+<p><strong>Пояснение:</strong>Erasure Code распределяет шарды по всем дискам кластера.
+При отказе одного сервера (4 диска) теряется до 4 шардов. Для восстановления данных достаточно
+любых 8 из 12 шардов, поэтому отказ одного сервера не влияет на доступность данных. Минус —
+производительность может временно снизиться, так как восстановление будет использовать
+оставшиеся шарды .</p>
+</div>
+
+<h3>3.4 Восстановление сервера</h3>
+
+<p><strong>На ВМ2</strong> (запускаем контейнер снова):</p>
+
+<pre class="bash">
+docker start minio-server
+</pre>
+
+<p><strong>На клиенте</strong> (проверяем, что сервер вернулся):</p>
+
+<pre class="bash">
+mcli admin info mycluster
+mcli admin heal mycluster
+</pre>
+
+<p class="explanation">
+<strong>Пояснение:</strong> После восстановления отказавшего узла MinIO автоматически
+запускает процесс healing — восстановление недостающих шардов на этом узле. Процесс происходит
+в фоне без остановки обслуживания. Статус можно отследить командой <code>mcli admin heal</code>.
+</p>
+
+<hr/>
+
+
+
+<h2>Этап 4: Горизонтальное масштабирование — добавление сервера</h2>
+
+<p><strong>Самый важный этап:</strong> Мы создадим четвёртый сервер (клон) и добавим
+его в существующий кластер, увеличив ёмкость и производительность.</p>
+
+<h3>4.1 Подготовка четвёртого сервера</h3>
+
+<ol>
+	<li>Клонируйте ВМ3 в ВМ4</li>
+	<li>Измените IP-адрес на ВМ4 на 192.168.56.111</li>
+	<li>Создайте директории для дисков на ВМ4</li>
+</ol>
+
+<p>На ВМ4</p>
+
+<pre class="bash">
+mkdir -p /data/minio/disk{1,2,3,4}
+</pre>
+
+<h3> 4.2 Остановка кластера для изменения конфигурации</h3>
+
+<div class="warning">
+<strong>Важно:</strong> В MinIO добавление нового пула серверов требует перезапуска
+кластера с новым списком узлов. Данные при этом не теряются.
+</div>
+
+<p><strong>На всех существующих серверах (ВМ1, ВМ2, ВМ3):</strong></p>
+
+<pre class="bash">
+docker stop minio-server
+docker rm minio-server
+</pre>
+
+<h3> 4.3 Запуск расширенного кластера (4 сервера, 16 дисков)</h3>
+
+<p><strong>Обновлённая команда запуска на ВМ1 (192.168.56.108):</strong></p>
+
+<pre class="bash">
+docker run -d \
+  --name minio-server \
+  --restart unless-stopped \
+  -p 9000:9000 \
+  -p 9001:9001 \
+  -v /data/minio/disk1:/data/disk1 \
+  -v /data/minio/disk2:/data/disk2 \
+  -v /data/minio/disk3:/data/disk3 \
+  -v /data/minio/disk4:/data/disk4 \
+  -e &quot;MINIO_ROOT_USER=minioadmin&quot; \
+  -e &quot;MINIO_ROOT_PASSWORD=minioadmin123&quot; \
+  quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z \
+  server --console-address &quot;:9001&quot; \
+  http://192.168.56.108/data/disk{1...4} \
+  http://192.168.56.109/data/disk{1...4} \
+  http://192.168.56.110/data/disk{1...4} \
+  http://192.168.56.111/data/disk{1...4}
+</pre>
+
+<p><strong>Эту же команду (скопировать и вставить) выполнить на ВМ2, ВМ3 и ВМ4!</strong></p>
+
+<h3>4.4 Проверка расширенного кластера</h3>
+
+<p><strong>На клиенте:</strong></p>
+
+<p>Проверяем информацию о кластере</p>
+
+<pre class="bash">
+mcli admin info mycluster
+</pre>
+
+<p><strong>Ожидаемый результат:</strong> 4 сервера, 16 дисков. Общая ёмкость увеличилась
+на 33% по сравнению с кластером из 3 серверов.</p>
+ 
+<div class="explanation">
+<p><strong>Вопрос:</strong> Как изменилась схема Erasure Code после добавления сервера?
+Сколько дисков может выйти из строя в новой конфигурации?</p>
+
+<p><strong>Пояснение:</strong> При 16 дисках MinIO может использовать схему
+<code>EC:12</code> (12 шардов данных, 4 шарда чётности) или аналогичную. Количество дисков,
+которое может выйти из строя, остаётся равным количеству шардов чётности (4), но общая ёмкость
+и производительность растут пропорционально количеству дисков .</p>
+</div>
+
+<h3>4.5 Проверка старых данных</h3>
+
+<p>Проверяем, что старые данные по-прежнему доступны</p>
+
+<pre class="bash">
+mcli ls mycluster/test-bucket/
+mcli cp mycluster/test-bucket/largefile.dat restored-after-scale.dat
+md5sum largefile.dat restored-after-scale.dat
+</pre>
+
+<p class="explanation">
+<strong>Пояснение:</strong> Добавление нового сервера не влияет на существующие
+данные. MinIO продолжает обслуживать старые объекты, а новые будут распределяться с
+учётом добавленных ресурсов. Для полной ребалансировки (перераспределения старых данных
+на новые диски) можно запустить команду <code class="cmd">mcli admin rebalance start
+mycluster</code>, но это необязательно и занимает время.
+</p>
+
+<hr/>
+
+
+
+<h2>Этап 5: Нагрузочное тестирование</h2>
+
+<h3>5.1 Тестирование производительности</h3>
+
+<p>Продемонстрируем, что добавление сервера распределяет нагрузку.</p>
+
+<p><strong>На клиенте:</strong></p>
+
+<p>Загружаем несколько больших файлов</p>
+
+<pre class="bash">
+for i in {1..10}; do
+    dd if=/dev/urandom of=file$i.dat bs=1M count=20
+    mcli cp file$i.dat mycluster/test-bucket/
+    echo &quot;Uploaded file$i.dat&quot;
+done
+</pre>
+
+<p>Просмотр использования дисков</p>
+
+<pre class="bash">
+mcli admin info mycluster
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Как вы думаете, на какие диски попали файлы?
+Распределяются ли они равномерно по новому серверу?</p>
+
+<p><strong>Пояснение:</strong> MinIO использует хеширование для равномерного
+распределения объектов по всем дискам кластера. Добавление нового сервера автоматически
+включает его во все будущие операции записи. Это обеспечивает линейную масштабируемость.</p>
+</div>
+
+<h3>5.2 Мониторинг через веб-консоль</h3>
+
+<p><strong>На клиенте</strong> откройте браузер и перейдите по адресу:
+<code>http://192.168.56.108:9001</code></p>
+
+<p>В веб-консоли можно увидеть:</p>
+<ul>
+	<li>Все серверы кластера и их статус</li>
+	<li>Использование дисков на каждом сервере</li>
+	<li>Текущие операции чтения/записи</li>
+</ul>
+
+<hr/>
+
+
+
+<h2>Этап 6: Симуляция отказа двух серверов (по желанию, если осталось время)</h2>
+
+<p><strong>На ВМ2 и ВМ3</strong> (останавливаем контейнеры):</p>
+
+<pre class="bash">
+docker stop minio-server
+</pre>
+
+<p><strong>На клиенте</strong> (проверяем):</p>
+
+<p>Проверка доступности данных</p>
+
+<pre class="bash">
+mcli ls mycluster/test-bucket/
+mcli cp mycluster/test-bucket/largefile.dat restored-after-two-failures.dat
+</pre>
+
+<p>Проверка статуса</p>
+
+<pre class="bash">
+mcli admin info mycluster
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> При отказе двух серверов (8 дисков) из 16 данные остались
+доступны? Почему?</p>
+<p><strong>Пояснение:</strong> При схеме EC:12 для восстановления достаточно
+любых 12 из 16 шардов. Отказ двух серверов (8 дисков) означает потерю 8 шардов, но если
+оставшиеся 8 дисков содержат 8 необходимых шардов данных, объект будет восстановлен.
+Однако если отказавшие серверы содержали критическое количество шардов данных, некоторые
+объекты могут стать недоступны.  Это демонстрирует важность правильного планирования
+отказоустойчивости.</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 7: Очистка</h2>
+
+<p><strong>На каждом сервере:</strong></p>
+
+<p>Останавливаем и удаляем контейнер</p>
+
+<pre class="bash">
+docker stop minio-server
+docker rm minio-server
+</pre>
+
+<p>Опционально: очищаем данные</p>
+
+<pre class="bash">
+rm -rf /data/minio/*
+</pre>
+
+<p><strong>На клиенте:</strong></p>
+
+<p>Удаляем тестовые файлы</p>
+
+<pre class="bash">
+rm -f largefile.dat restored-*.dat file*.dat
+</pre>
+
+<hr/>
+
+
+
+<h2>Контрольные вопросы</h2>
+
+<ol>
+	<li>Сколько серверов минимально нужно для отказоустойчивого кластера MinIO с
+		Erasure Coding в production среде?</li>
+	<li>Что произойдёт с данными, если отказали 2 сервера из 4 при схеме EC:12?</li>
+	<li>Как изменится схема Erasure Coding при добавлении четвёртого сервера к трём?</li>
+	<li>Можно ли добавить сервер с другим количеством дисков?</li>
+	<li>Как MinIO обеспечивает равномерное распределение данных при добавлении
+		нового сервера?</li>
+	<li>Что такое &quot;healing&quot; в MinIO и как он работает после восстановления
+		отказавшего узла?</li>
+	<li>Почему MinIO не требует отдельного сервера метаданных (в отличие от некоторых
+		других SDS-решений)?</li>
+	<li>Как проверить, какие диски в кластере используются для хранения конкретного
+		объекта?</li>
+	<li>В чём отличие Erasure Code от традиционного RAID с точки зрения масштабирования?</li>
+	<li>Какую команду нужно выполнить для ребалансировки старых данных после добавления нового
+		сервера?</li>
+</ol>
+
+<hr/>
+
+
+
+<h2>Шпаргалка (дополнение)</h2>
+<table>
+	<thead>
+		<tr>
+			<th>Действие</th>
+			<th>Команда</th>
+		</tr>
+	</thead>
+	<tbody>
+		<tr>
+			<td>Запуск кластера из N серверов</td>
+			<td><code class="cmd">minio server http://{server1}/data/disk{1...4}
+				http://{server2}/data/disk{1...4} ...</code></td>
+		</tr>
+		<tr>
+			<td>Просмотр информации о кластере</td>
+			<td><code class="cmd">mcli admin info mycluster</code></td>
+		</tr>
+		<tr>
+			<td>Просмотр статуса дисков</td>
+			<td><code class="cmd">mcli admin heal mycluster --verbose</code></td>
+		</tr>
+		<tr>
+			<td>Запуск ребалансировки</td>
+			<td><code class="cmd">mcli admin rebalance start mycluster</code></td>
+		</tr>
+		<tr>
+			<td>Статус ребалансировки</td>
+			<td><code class="cmd">mcli admin rebalance status mycluster</code></td>
+		</tr>
+	</tbody>
+</table>
+
+<hr/>
+
+
+
+<h2>Выводы</h2>
+
+<ul>
+	<li>MinIO позволяет легко масштабировать объектное хранилище путём добавления новых
+		серверов (клонов ВМ) в кластер.</li>
+	<li>Для отказоустойчивости MinIO использует Erasure Code, распределяя шарды данных и
+		чётности по всем дискам кластера.</li>
+	<li>При 12 дисках (3 сервера) кластер выдерживает отказ до 4 дисков (схема EC:8).</li>
+	<li>Добавление четвёртого сервера (16 дисков) увеличивает общую ёмкость и
+		производительность, а схема EC автоматически перестраивается.</li>
+	<li>MinIO не требует отдельного сервера управления — кластер формируется автоматически
+		при запуске с одинаковым списком узлов.</li>
+	<li>Процесс healing автоматически восстанавливает данные после возвращения отказавшего
+		узла.</li>
+	<li>В отличие от традиционных RAID-массивов, Erasure Code работает на уровне объектов,
+		а не блоков, что обеспечивает гибкость при добавлении новых серверов.</li>
+</ul>
+
+<hr/>
+
+</body>
+</html>

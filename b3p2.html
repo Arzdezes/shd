@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="ru-RU">
+
+  <head>
+    <title>SHD</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="shd.css">
+  </head>
+
+<body>
+
+<h1> Лабораторная работа №2: LVM поверх программного RAID</h1>
+
+<p><strong>Тема:</strong> Комбинирование mdadm и LVM для отказоустойчивости и гибкости</p>
+<p><strong>Цель работы:</strong> Научиться создавать RAID-массив, поверх него
+разворачивать LVM, а также отработать сценарий отказа диска и его замены в такой связке.</p>
+
+
+<h3>Необходимое оборудование</h3>
+<ul>
+	<li>
+	Любой дистрибутив Linux (рекомендуется ALT/Ubuntu/Debian/CentOS)
+	с установленными пакетами <code>lvm2</code>.
+	</li>
+	<li>
+	Права root: <code class="cmd">su -</code> или <code class="cmd">sudo -i</code>.
+	</li>
+</ul>
+
+
+<h3>Подготовка loop-устройств</h3>
+
+<p>Создадим 5 файлов-образов (4 для RAID, 1 для горячей замены):</p>
+
+<pre class="bash">
+losetup -D
+for i in {0..4}
+do
+  dd if=/dev/zero of=disk$i.img bs=1M count=1024
+  losetup /dev/loop$i disk$i.img
+done
+</pre>
+
+<hr/>
+
+
+
+<h2>Этап 1: Создание RAID-массива</h2>
+
+<p><strong>Создайте RAID 10</strong> из четырёх дисков:</p>
+
+<pre class="bash">
+mdadm --create /dev/md0 --level=10 --raid-devices=4 /dev/loop0 /dev/loop1 /dev/loop2 /dev/loop3
+</pre>
+
+<p><strong>Проверьте статус создания и дождитесь завершения</strong> (или работайте в фоне):</p>
+
+<pre class="bash">
+cat /proc/mdstat
+mdadm --detail /dev/md0
+</pre>
+
+<hr/>
+
+
+
+<h2 class="western">Этап 2: LVM поверх RAID</h2>
+
+<p><strong>Создайте физический том</strong> на RAID-устройстве:</p>
+
+<pre class="bash">
+pvcreate /dev/md0
+pvs
+</pre>
+
+<p><strong>Создайте группу томов</strong> с именем <code>vg_raid</code>:</p>
+
+<pre class="bash">
+vgcreate vg_raid /dev/md0
+vgs
+</pre>
+
+<p><strong>Создайте логические тома</strong> для разных целей:</p>
+
+<pre class="bash">
+lvcreate -n lv_data -L 500M vg_raid
+lvcreate -n lv_backup -L 500M vg_raid
+lvcreate -n lv_logs -l 100%FREE vg_raid
+lvs
+</pre>
+
+<p><strong>Создайте файловые системы</strong> и примонтируйте их:</p>
+
+<pre class="bash">
+mkfs.ext4 /dev/vg_raid/lv_data
+mkfs.xfs /dev/vg_raid/lv_backup
+mkfs.ext4 /dev/vg_raid/lv_logs
+
+mkdir -p /mnt/{data,backup,logs}
+
+mount /dev/vg_raid/lv_data /mnt/data
+mount /dev/vg_raid/lv_backup /mnt/backup
+mount /dev/vg_raid/lv_logs /mnt/logs
+
+df -h
+</pre>
+
+<p><strong>Наполните тома данными</strong> (скопируйте логи или создайте тестовые файлы):</p>
+
+<pre class="bash">
+find /var/log -type f -size -1M -exec cp {} /mnt/logs/ \;
+dd if=/dev/urandom of=/mnt/data/file1.dat bs=1M count=200
+dd if=/dev/urandom of=/mnt/backup/backup1.dat bs=1M count=100
+</pre>
+
+<hr/>
+
+
+
+<h2>Этап 3: Имитация отказа диска и восстановление</h2>
+
+<p><strong>Сценарий:</strong> Один из дисков в RAID-массиве вышел
+из строя. Нужно заменить его, не потеряв данные и не останавливая сервисы.</p>
+
+<p><strong>Пометите один из дисков как сбойный</strong> (например, <code>/dev/loop1</code>):</p>
+
+<pre class="bash">
+mdadm --manage /dev/md0 --fail /dev/loop1
+mdadm --detail /dev/md0
+</pre>
+
+<div class="explanation">
+	Статус диска должен измениться на <code>faulty</code>.
+</div>
+
+<p><strong>Убедитесь, что данные доступны.</strong>
+Проверьте содержимое <code>/mnt/data</code>,
+<code>/mnt/backup</code>, <code>/mnt/logs</code>.
+RAID работает в деградированном режиме.</p>
+
+<pre class="bash">
+ls /mnt/logs
+ls /mnt/data
+ls /mnt/backup
+</pre>
+
+<p><strong>Удалите сбойный диск из массива:</strong></p>
+
+<pre class="bash">
+mdadm --manage /dev/md0 --remove /dev/loop1
+</pre>
+
+<p><strong>Добавьте новый диск</strong> (роль нового диска выполняет
+<code>/dev/loop4</code>, который мы создали как горячий резерв):</p>
+
+<pre class="bash">
+mdadm --manage /dev/md0 --add /dev/loop4
+</pre>
+
+<p><strong>Наблюдайте за процессом восстановления (rebuild):</strong></p>
+
+<pre class="bash">
+watch -n 1 cat /proc/mdstat
+</pre>
+
+<div class="explanation">
+	Процесс может занять несколько минут. Во время восстановления
+	все данные остаются доступными.
+</div>
+
+<p><strong>После завершения восстановления проверьте статус:</strong></p>
+
+<pre class="bash">
+mdadm --detail /dev/md0
+</pre>
+
+<div class="explanation">
+	Все диски должны быть в состоянии <code>active sync</code>.
+</div>
+
+<hr/>
+
+
+
+<h2 class="western">Этап 4: Расширение LVM за счёт нового диска в RAID</h2>
+
+<p><strong>Сценарий:</strong> После замены сбойного диска у нас остался
+старый диск <code>/dev/loop1</code> (он был удалён из RAID) и мы добавим в систему
+новый диск <code>/dev/loop5</code>.  Теперь мы хотим увеличить пространство
+RAID-массива, добавив оба диска в массив, а затем расширить LVM.</p>
+
+
+<h3>4.1 Подготовка дисков</h3>
+
+<p><strong>Очистим старый диск</strong> <code>/dev/loop1</code> от mdadm-суперблока:</p>
+
+<pre class="bash">
+mdadm --zero-superblock /dev/loop1
+</pre>
+
+<p><strong>Создадим новый диск </strong><code>/dev/loop5</code>:</p>
+
+<pre class="bash">
+dd if=/dev/zero of=disk5.img bs=1M count=1024
+losetup /dev/loop5 disk5.img
+</pre>
+
+<hr/>
+
+
+<h3 class="western">4.2 Добавление дисков в RAID10 как hot spare</h3>
+
+<p><strong>Добавим оба диска в RAID массив:</strong></p>
+
+<pre class="bash">
+mdadm --manage /dev/md0 --add /dev/loop1 /dev/loop5
+</pre>
+
+<p><strong>Проверим статус,</strong> оба диска должны появиться как <code>spare</code>:</p>
+
+<pre class="bash">
+mdadm --detail /dev/md0 | grep -E &quot;loop1|loop5&quot;
+</pre>
+
+<hr/>
+
+<h3>4.3 Преобразование RAID10 в конфигурацию с 6 дисками</h3>
+
+<p>Теперь увеличим количество активных дисков в RAID10 с 4 до 6.</p>
+
+<p><strong>Выполним преобразование:</strong></p>
+
+<pre class="bash">
+mdadm --grow /dev/md0 --raid-devices=6
+</pre>
+
+<p><strong>Наблюдаем за процессом перестройки:</strong></p>
+
+<pre class="bash">
+watch -n 1 cat /proc/mdstat
+</pre>
+
+<div class="explanation">
+	Процесс может занять несколько минут. После завершения все 6
+	дисков будут в состоянии <code>active sync</code>.
+</div>
+
+<p><strong>Проверим итоговый статус:</strong></p>
+
+<pre class="bash">
+mdadm --detail /dev/md0
+</pre>
+
+<hr/>
+
+
+<h3 class="western">4.4 Расширение LVM</h3>
+
+<p>Теперь, когда RAID-массив увеличился, нужно расширить физический том LVM,
+группу томов и логические тома.</p>
+
+<p><strong>Расширим физический том на всё доступное пространство RAID:</strong></p>
+
+<pre class="bash">
+pvresize /dev/md0
+pvs
+</pre>
+
+<div class="explanation">
+	Поле <code>PSize</code> для <code>/dev/md0</code> должно увеличиться.
+</div>
+
+<p><strong>Проверим свободное место в группе томов:</strong></p>
+
+<pre class="bash">
+vgs
+</pre>
+
+<div class="explanation">
+	Поле <code>VFree</code> должно показать дополнительное свободное место.
+</div>
+
+<p><strong>Расширим логический том <code>lv_data</code> на 500 МБ:</strong></p>
+
+<pre class="bash">
+lvextend -r -L +500M /dev/vg_raid/lv_data
+</pre>
+
+<p><strong>Проверим результат:</strong></p>
+
+<pre class="bash">
+df -h /mnt/data
+lvs
+</pre>
+
+<hr/>
+
+
+<h3> 4.5 Итоговая схема использования дисков</h3>
+
+<table>
+	<thead>
+		<tr>
+			<th>Устройство</th>
+			<th>Роль в начале</th>
+			<th>Роль после этапа 4</th>
+		</tr>
+	</thead>
+	<tbody>
+		<tr>
+			<td><code>/dev/loop0</code></td>
+			<td>RAID10 (active)</td>
+			<td>RAID10 (active)</td>
+		</tr>
+		<tr>
+			<td><code>/dev/loop1</code></td>
+			<td>FAILED (удалён)</td>
+			<td><strong>RAID10 (active)</strong> </td>
+		</tr>
+		<tr>
+			<td><code>/dev/loop2</code></td>
+			<td>RAID10 (active)</td>
+			<td>RAID10 (active) </td>
+		</tr>
+		<tr>
+			<td><code>/dev/loop3</code></td>
+			<td>RAID10 (active)</td>
+			<td>RAID10 (active)</td>
+		</tr>
+		<tr>
+			<td><code>/dev/loop4</code></td>
+			<td>Замена loop1 (active)</td>
+			<td>RAID10 (active)</td>
+		</tr>
+		<tr>
+			<td><code>/dev/loop5</code> </td>
+			<td>(не использовался) </td>
+			<td><strong>RAID10 (active)</strong></td>
+		</tr>
+	</tbody>
+</table>
+
+<hr/>
+
+
+<h3>4.6 Вопросы к обсуждению</h3>
+
+<ol>
+	<li><strong>Что дало добавление двух дисков в RAID10?</strong>
+	<ul>
+		<li>Увеличилась общая ёмкость массива
+		(с 4 до 6 дисков) и повысилась
+		отказоустойчивость (RAID10 выдерживает
+		до 2 отказов при условии, что они в
+		разных зеркальных парах).</li>
+	</ul></li>
+	<li><strong>Почему после <code>--grow</code> не нужно было пересоздавать LVM?</strong>
+	<ul>
+		<li>LVM работает поверх блочного
+		устройства <code>/dev/md0</code>. После
+		увеличения размера RAID достаточно
+		выполнить <code>pvresize</code>, чтобы
+		LVM узнал о новом пространстве.</li>
+	</ul></li>
+	<li><strong>Что произойдёт, если во время <code>--grow</code> отключится питание?</strong>
+	<ul>
+		<li>mdadm умеет возобновлять прерванные
+		операции. После перезагрузки перестройка
+		продолжится с того места, где остановилась.</li>
+	</ul>
+</ol>
+
+<hr/>
+
+
+
+<h2>Этап 5: Тестирование отказоустойчивости LVM поверх RAID</h2>
+
+<p><strong>Сымитируйте отказ ещё одного диска</strong> (например, <code>/dev/loop2</code>):</p>
+
+<pre class="bash">
+mdadm --manage /dev/md0 --fail /dev/loop2
+</pre>
+
+<div class="explanation">
+	<strong>Проверьте доступность данных</strong> во всех трёх
+	точках монтирования. LVM продолжает работать, так как RAID10
+	выдерживает до двух отказов (в разных зеркальных парах).
+</div>
+
+<p><strong>Верните диск в строй</strong> (или используйте горячий резерв):</p>
+
+<pre class="bash">
+mdadm --manage /dev/md0 --remove /dev/loop2
+mdadm --manage /dev/md0 --add /dev/loop2  # если диск исправен
+</pre>
+
+<div class="explanation">
+	Наблюдайте восстановление.
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 6: Демонтаж и очистка</h2>
+
+<p>Размонтируйте всё:</p>
+
+<pre class="bash">
+umount /mnt/data /mnt/backup /mnt/logs
+</pre>
+
+<p>Удалите логические тома и группу:</p>
+
+<pre class="bash">
+lvremove vg_raid/lv_data vg_raid/lv_backup vg_raid/lv_logs
+vgremove vg_raid
+pvremove /dev/md0 /dev/loop5
+</pre>
+
+<p>Остановите RAID-массив:</p>
+
+<pre class="bash">
+mdadm --stop /dev/md0
+</pre>
+
+<p>Очистите суперблоки mdadm на дисках (на всякий случай):</p>
+
+<pre class="bash">
+for i in {0..5}
+do
+  mdadm --zero-superblock /dev/loop$i
+done
+</pre>
+
+<p>Отключите loop-устройства и удалите файлы:</p>
+
+<pre class="bash">
+losetup -D
+for i in {0..5}
+do
+  rm -f disk$i.img
+done
+</pre>
+
+<hr/>
+
+
+
+<h2>Контрольные вопросы</h2>
+
+<ol>
+	<li>Какие преимущества даёт связка RAID + LVM по сравнению с
+		использованием только RAID или только LVM?</li>
+	<li>Что произойдёт с LVM, если RAID-массив перейдёт в деградированное
+		состояние? Нужно ли что-то делать с LVM?</li>
+	<li>Почему не рекомендуется создавать PV на отдельных разделах внутри
+		RAID, а лучше создавать PV на всём RAID-устройстве?</li>
+	<li>В каком порядке нужно восстанавливать систему после отказа
+		нескольких дисков?</li>
+</ol>
+
+<hr/>
+
+</body>
+</html>

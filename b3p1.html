@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="ru-RU">
+
+  <head>
+    <title>SHD</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="shd.css">
+  </head>
+
+<body>
+
+<h1> Лабораторная работа №1: LVM — Гибкое управление хранилищем</h1>
+
+<p><strong>Тема:</strong> Создание, расширение, снапшоты и тонкие тома.</p>
+<p><strong>Цель работы:</strong> Научиться создавать LVM-структуру, изменять размеры томов,
+использовать снапшоты для восстановления данных и познакомиться с thin provisioning.</p>
+
+
+<h3>Необходимое оборудование</h3>
+<ul>
+	<li>
+	Любой дистрибутив Linux (рекомендуется ALT/Ubuntu/Debian/CentOS) с установленными пакетами <code>lvm2</code>.
+	</li>
+	<li>
+	Права root: <code class="cmd">su -</code> или <code class="cmd">sudo -i</code>.
+	</li>
+</ul>
+
+
+<h3>Подготовка loop-устройств</h3>
+<p>Вместо реальных дисков мы будем использовать файлы-образы, подключенные
+через loop-устройства. Это безопасно и идеально для практики.</p>
+<p>Создадим 4 файла по 1 ГБ каждый, которые будут имитировать диски и подключим их
+как loop-устройства:</p>
+
+<pre class="bash">
+losetup -D
+for i in {0..3}
+do
+  dd if=/dev/zero of=disk$i.img bs=1M count=1024
+  losetup /dev/loop$i disk$i.img
+done
+</pre>
+
+<hr/>
+
+
+
+<h2>Этап 1: Создание базовой LVM-структуры</h2>
+<p><strong>Создайте физические тома (PV)</strong> на первых двух дисках:</p>
+<pre class="bash">
+pvcreate /dev/loop0 /dev/loop1
+pvs
+</pre>
+
+<p> <strong>Создайте группу томов (VG)</strong> с именем <code>vg_lab1</code>:</p>
+
+<pre class="bash">
+vgcreate vg_lab1 /dev/loop0 /dev/loop1
+vgs
+vgdisplay vg_lab1
+</pre>
+
+<p><strong>Создайте логический том (LV)</strong>
+размером 500 МБ с именем <code>lv_web</code>:</p>
+<pre class="bash">
+lvcreate -n lv_web -L 500M vg_lab1
+lvs
+</pre>
+
+<p><strong>Создайте файловую систему ext4</strong>
+на <code>lv_web</code> и примонтируйте
+его в <code>/mnt/web</code>:</p>
+
+<pre class="bash">
+mkfs.ext4 /dev/vg_lab1/lv_web
+mkdir -p /mnt/web
+mount /dev/vg_lab1/lv_web /mnt/web
+df -h /mnt/web
+</pre>
+
+<p><strong>Наполните том данными.</strong> Скопируйте
+туда несколько файлов, например, логи
+системы или просто создайте тестовые файлы:</p>
+
+<pre class="bash">
+find /var/log -type f -size -1M -exec cp {} /mnt/web/ \;
+dd if=/dev/urandom of=/mnt/web/random1.dat bs=1M count=50
+dd if=/dev/urandom of=/mnt/web/random2.dat bs=1M count=50
+</pre>
+<hr/>
+
+
+
+<h2>Этап 2: Расширение логического тома</h2>
+
+<p><strong>Сценарий:</strong> Наш том <code>/mnt/web</code>
+заполняется, нужно увеличить его размер.</p>
+
+<p><strong>Проверьте текущее использование:</strong></p>
+
+<pre class="bash">
+df -h /mnt/web
+vgs vg_lab1
+</pre>
+
+<p><strong>Убедитесь, что в группе томов есть свободное место.</strong>
+Мы создали VG из двух дисков по 1 ГБ, итого 2 ГБ. Занято 500 МБ (lv_web)
+плюс небольшой оверхед. Должно быть около 1.5 ГБ свободно.</p>
+
+<p><strong>Расширьте логический том на 300 МБ:</strong></p>
+
+<pre class="bash">
+lvextend -L +300M /dev/vg_lab1/lv_web
+</pre>
+
+<p><strong>Расширьте файловую систему:</strong></p>
+
+<pre class="bash">
+resize2fs /dev/vg_lab1/lv_web
+</pre>
+
+<p><strong>Проверьте результат:</strong></p>
+
+<pre class="bash">
+df -h /mnt/web
+lvs
+</pre>
+
+<p>Размер тома и ФС должен увеличиться.</p>
+<hr/>
+
+
+
+<h2>Этап 3: Снапшоты и восстановление</h2>
+<p><strong>Сценарий:</strong> Мы собираемся делать обновление веб-сайта
+(хранящегося в <code>/mnt/web</code>) и хотим иметь
+возможность откатиться, если что-то пойдёт не так.</p>
+
+<p><strong>Создайте снапшот</strong> текущего состояния тома
+<code>lv_web</code> размером 200 МБ:</p>
+
+<pre class="bash">
+lvcreate -s -n lv_web_snap -L 200M /dev/vg_lab1/lv_web
+lvs
+</pre>
+
+<div class="explanation">
+	Обратите внимание: в выводе <code>lvs</code>
+	появится новый том с типом <code>snap</code>.
+</div>
+
+<p><strong>Имитируйте неудачное обновление:</strong>
+Удалите часть данных и создайте новые файлы.</p>
+
+<pre class="bash">
+rm -f /mnt/web/random1.dat
+dd if=/dev/zero of=/mnt/web/bad_update.dat bs=1M count=80
+touch /mnt/web/hacked.txt
+ls -la /mnt/web/
+</pre>
+
+<p><strong>Восстановите исходное состояние из снапшота:</strong></p>
+
+<pre class="bash">
+umount /mnt/web
+lvconvert --merge /dev/vg_lab1/lv_web_snap
+</pre>
+
+<div class="explanation">
+	Система сообщит, что снапшот будет слит при активации тома.
+</div>
+
+<p><strong>Примонтируйте том обратно и проверьте данные:</strong></p>
+
+<pre class="bash">
+mount /dev/vg_lab1/lv_web /mnt/web
+ls -la /mnt/web/
+</pre>
+
+<p>Файлы <code>random1.dat</code> должны вернуться,
+а <code>bad_update.dat</code>
+и <code>hacked.txt</code> исчезнуть.
+Снапшот автоматически удалился после слияния.</p>
+
+<hr/>
+
+
+
+<h2>Этап 4: Перемещение данных (pvmove)</h2>
+
+<p><strong>Сценарий:</strong> Мы обнаружили, что диск
+<code>/dev/loop0</code> старый и ненадёжный.
+Нужно перенести с него все данные на новый диск, не останавливая работу.</p>
+
+<p><strong>Добавьте в систему третий диск</strong>
+(имитируем новый диск). У нас уже есть <code>/dev/loop2</code>:</p>
+
+<pre class="bash">
+pvcreate /dev/loop2
+vgextend vg_lab1 /dev/loop2
+pvs
+</pre>
+
+<p><strong>Запустите перемещение всех данных с <code>/dev/loop0</code>:</strong></p>
+
+<pre class="bash">
+pvmove /dev/loop0
+</pre>
+
+<div class="explanation">
+	Эта команда будет выполняться в фоне. Откройте второй терминал и следите за прогрессом.
+</div>
+
+<p><strong>В другом терминале (или после завершения) проверьте:</strong></p>
+
+<pre class="bash">
+pvs
+</pre>
+
+<div class="explanation">
+	На <code>/dev/loop0</code> должно стать 0 used. Все экстенты теперь на
+	<code>/dev/loop1</code> и <code>/dev/loop2</code>.
+</div>
+
+<p><strong>Удалите старый диск из VG и полностью очистите его:</strong></p>
+
+<pre class="bash">
+vgreduce vg_lab1 /dev/loop0
+pvremove /dev/loop0
+pvs
+</pre>
+
+<hr/>
+
+
+
+<h2>Этап 5: Знакомство с Thin Provisioning</h2>
+
+<p><strong>Сценарий:</strong> Для виртуальных машин нужно выделить
+тома с большим виртуальным размером, но физически использовать
+место экономно.</p>
+
+<p><strong>Создайте thin pool</strong> размером 800 МБ из оставшегося
+места (используем четвёртый диск <code>/dev/loop3</code>):</p>
+
+<pre class="bash">
+pvcreate /dev/loop3
+vgextend vg_lab1 /dev/loop3
+lvcreate -L 800M -T vg_lab1/thin_pool
+</pre>
+
+<p><strong>Создайте три тонких тома</strong> с виртуальными размерами 600 МБ,
+600 МБ и 600 МБ (суммарно 1.8 ГБ виртуальных при 800 МБ физических):</p>
+
+<pre class="bash">
+lvcreate -V 600M -T vg_lab1/thin_pool -n thin_vm1
+lvcreate -V 600M -T vg_lab1/thin_pool -n thin_vm2
+lvcreate -V 600M -T vg_lab1/thin_pool -n thin_vm3
+lvs -a
+</pre>
+
+<div class="explanation">
+	Обратите внимание: в выводе <code>lvs</code> будет
+	thin_pool (и его компоненты tmeta, tdata) и три тонких тома. Размер,
+	указанный для тонких томов — виртуальный.
+</div>
+
+<p><strong>Создайте ФС на первом тонком томе и примонтируйте:</strong></p>
+
+<pre class="bash">
+mkfs.ext4 /dev/vg_lab1/thin_vm1
+mkdir -p /mnt/vm1
+mount /dev/vg_lab1/thin_vm1 /mnt/vm1
+</pre>
+
+<p><strong>Начните заполнять том данными</strong> и следите за использованием пула:</p>
+
+<pre class="bash">
+watch -n 1 lvs -a vg_lab1/thin_pool
+</pre>
+
+<p>В другой консоли <strong>начните запись:</strong></p>
+
+<pre class="bash">
+dd if=/dev/urandom of=/mnt/vm1/bigfile bs=1M count=700
+</pre>
+
+<div class="explanation">
+	Обратите внимание, как по мере записи растёт использование Data%
+	в thin_pool. Если заполнить весь пул, тома перейдут в состояние ошибки.
+</div>
+
+<p><strong>Завершите эксперимент</strong>, остановите запись (Ctrl+C),
+когда пул заполнится примерно на 80-90%.</p>
+
+<hr/>
+
+
+
+<h2>Завершение работы</h2>
+
+<p>Размонтируйте всё, что монтировали:</p>
+
+<pre class="bash">
+umount /mnt/web /mnt/vm1
+</pre>
+
+<p> Удалите логические тома и группу:</p>
+
+<pre class="bash">
+lvremove vg_lab1/thin_vm1 vg_lab1/thin_vm2 vg_lab1/thin_vm3
+lvremove vg_lab1/thin_pool
+lvremove vg_lab1/lv_web
+vgremove vg_lab1
+pvremove /dev/loop0 /dev/loop1 /dev/loop2 /dev/loop3
+</pre>
+
+<p> Отключите loop-устройства и удалите файлы:</p>
+
+<pre class="bash">
+losetup -D
+rm -f disk$i.img
+</pre>
+
+<hr/>
+
+
+<h2 class="western">Контрольные вопросы</h2>
+
+<ol>
+        <li>В чём разница между <code>-L</code> и <code>-l</code>
+		в командах <code>lvcreate</code>?</li>
+        <li>Что произойдёт с данными, если переполнить область снапшота?</li>
+        <li>Почему при использовании thin provisioning нужно обязательно
+		мониторить заполнение пула?</li>
+        <li>Как узнать, какие физические диски используются конкретным
+		логическим томом?</li>
+</ol> 
+
+<hr/>
+
+</body>
+</html>

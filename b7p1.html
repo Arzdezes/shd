@@ -1,0 +1,896 @@
+<!DOCTYPE html>
+<html lang="ru-RU">
+
+  <head>
+    <title>SHD</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="shd.css">
+  </head>
+
+<body>
+
+<h1>Лабораторная работа №1: Введение в S3 на MinIO</h1>
+
+<p><strong>Тема:</strong> Знакомство с объектнымхранилищем S3 на примере MinIO: установка
+на сервер, подключение с клиента, работачерез веб-консоль, CLI и API.</p>
+
+<p><strong>Цель работы:</strong> Освоить базовыепринципы работы объектного хранилища
+S3, научиться устанавливать и настраиватьMinIO в клиент-серверной архитектуре,
+выполнять основные операции с бакетамии объектами через веб-интерфейс, командную
+строку и программный API.</p>
+
+<p><strong>Топология:</strong></p>
+<ul>
+	<li><p><strong>Сервер:</strong> ALT Server 11 (виртуальнаямашина) —
+		192.168.56.101</p></li>
+	<li><p><strong>Клиент:</strong> ALT Workstation 10.4 (хостовая	система)
+		 — 192.168.56.1 (или другой адрес в сети 192.168.56.0/24)</li>
+</ul>
+
+<p><strong>Важное примечание о версии MinIO:</strong>
+В мае 2025 года MinIO изменила политику распространения: в community-версии (после
+RELEASE.2025-05-24) из веб-интерфейса удалены административные функции (управление
+пользователями, ключами доступа, политиками), оставлен только Object Browser
+для базовой работы с бакетами и файлами. Для полноценной демонстрации всех
+возможностей в лабораторной работе используется стабильная версия
+<code>RELEASE.2025-04-22T22-12-26Z</code> — последняя версия с полной веб-консолью.</p>
+
+<hr/>
+
+
+
+<h2>Подготовка</h2>
+
+<div class="warning">
+<strong>Важно:</strong> Для выполнения команд с правами администратора
+мы будем использовать <code class="cmd">su -</code>.<br/>
+Переключитесь в режим root на обеих машинах.
+</div>
+
+<h3>1.1 Проверка сетевого взаимодействия</h3>
+
+<p><strong>На сервере (ALT Server):</strong></p>
+
+<pre class="bash">
+su -
+ip a | grep 192.168.56
+</pre>
+
+<p>Запомните IP-адрес сервера (должен быть<code>192.168.56.102</code> или аналогичный,
+который выдал DHCP).</p>
+
+<p><strong>На клиенте (ALT Workstation):</strong></p>
+
+<pre class="bash">
+su -
+ping -c 3 192.168.56.102
+</pre>
+
+<p class="explanation"><strong>Пояснение:</strong> Убеждаемся, что клиент и сервер видят друг
+друга в сети. Это критически важно для клиент-серверной архитектуры.</p>
+
+<h3>1.2 Установка Docker на сервере</h3>
+
+<p><strong>На сервере (ALT Server):</strong></p>
+
+<p>Установка Docker</p>
+
+<pre class="bash">
+apt-get update
+apt-get install docker-io
+</pre>
+
+<p>Запуск Docker</p>
+
+<pre class="bash">
+systemctl enable docker
+systemctl start docker
+</pre>
+
+<p>Проверка установки</p>
+
+<pre class="bash">
+docker --version
+</pre>
+
+<p class="explanation"> <strong>Пояснение:</strong> Docker позволяет легко запускать MinIO в
+изолированном контейнере без необходимости установки дополнительных зависимостей.
+Это стандартный способ развёртывания MinIO в production-среде.</p>
+
+<h3>1.3 Запуск MinIO Container (нужная версия)</h3>
+
+<p><strong>На сервере (ALT Server):</strong></p>
+
+<p>Создаём директорию для данных MinIO</p>
+
+<pre class="bash">
+mkdir -p /data/minio
+</pre>
+
+<p>Запускаем контейнер MinIO версии с полной веб-консолью</p>
+
+<pre class="bash">
+docker run -d \
+  --name minio-server \
+  -p 9000:9000 \
+  -p 9001:9001 \
+  -v /data/minio:/data \
+  -e &quot;MINIO_ROOT_USER=minioadmin&quot; \
+  -e &quot;MINIO_ROOT_PASSWORD=minioadmin123&quot; \
+  quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z \
+  server /data --console-address &quot;:9001&quot;
+</pre>
+
+<div class="explanation">
+<p><strong>Пояснение:</strong></p>
+<ul>
+	<li><code>-d</code> — запуск в фоновом режиме (detach)</li>
+	<li><code>--name minio-server</code> — имя контейнера для удобного управления</li>
+	<li><code>-p 9000:9000</code> и <code>-p 9001:9001</code> — проброс портов из контейнера
+		на хост (API и веб-консоль)</li>
+	<li><code>-v /data/minio:/data</code> — монтирование директории с данными на
+		хост (чтобы данные сохранялись при перезапуске)</li>
+	<li><code>-e</code> — установка переменных окружения (логин и пароль администратора)</li>
+	<li>Используется образ <code>quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z</code>
+		— последняя версия с полным функционалом веб-консоли </li>
+</ul>
+</div>
+
+<h3>1.4 Проверка работы контейнера</h3>
+
+<p>Просмотр запущенных контейнеров</p>
+
+<pre class="bash">
+docker ps
+</pre>
+
+<p>Просмотр логов (если что-то пошло не так)</p>
+
+<pre class="bash">
+docker logs minio-server
+</pre>
+
+<p class="explanation"><strong>Пояснение:</strong> Контейнер должен быть в статусе <code>Up</code>.
+Если статус <code>Exited</code> — смотрите логи для диагностики.</p>
+
+<h3>1.5 Установка MinIO Client на хосте</h3>
+
+<p><strong>Важное замечание о конфликте имён:</strong> Утилита MinIO Client называется
+<code>mc</code>, что совпадает с названием файлового менеджера Midnight
+Commander, который может быть установлен на хосте. В лабораторной работе мы будем
+использовать переименованную версию <code>mcli</code>, чтобы избежать конфликта.</p>
+
+<p><strong>На клиенте (ALT Workstation):</strong></p>
+
+<p>Скачиваем MinIO Client</p>
+
+<pre class="bash">
+wget https://dl.min.io/client/mc/release/linux-amd64/mc
+chmod +x mc
+</pre>
+
+<p>Переименовываем (чтобы не конфликтовать с Midnight Commander)</p>
+
+<pre class="bash">
+mv mc /usr/local/bin/mcli
+</pre>
+
+<p>Проверяем установку</p>
+
+<pre class="bash">
+mcli --version
+</pre>
+
+<p class="explanation">
+<strong>Пояснение:</strong> Конфликт имён между MinIO Client (<code>mc</code>) и
+Midnight Commander (<code>mc</code>) — известная проблема в мире Linux.
+Переименование в <code>mcli</code> — самое простое и безопасное решение.  </p>
+
+<hr/>
+
+
+
+<h2>Этап 2: Знакомство с веб-консолью MinIO</h2>
+
+<h3>2.1 Подключение к веб-консоли</h3>
+
+<p><strong>На клиенте (ALT Workstation):</strong></p>
+<ol>
+	<li>Откройте браузер на хосте.</li>
+	<li>Перейдите по адресу: <code>http://192.168.56.102:9001</code></li>
+	<li>Введите учётные данные:
+	<ul>
+		<li><strong>Username:</strong> <code>minioadmin</code></li>
+		<li><strong>Password:</strong> <code>minioadmin123</code></li>
+	</ul>
+</ol>
+
+<p class="explanation"><strong>Пояснение:</strong> Порт 9001 — это порт веб-консоли
+MinIO, которая предоставляет графический интерфейс для управления хранилищем.</p>
+
+<h3>2.2 Обзор интерфейса веб-консоли</h3>
+
+<p>После входа вы увидите главную панель управления (Dashboard). В используемой версии
+MinIO доступны следующие разделы:</p>
+
+<table>
+	<thead>
+		<tr>
+			<th>Раздел</th>
+			<th>Назначение</th>
+			<th>Что можно делать</th>
+		</tr>
+	</thead>
+	<tbody>
+		<tr>
+			<td>Dashboard</td>
+			<td>Главная панель</td>
+			<td>Просмотр общей информации о сервере: количество дисков,
+				использованное пространство, uptime</td>
+		</tr>
+		<tr>
+			<td>Buckets</td>
+			<td>Управление бакетами</td>
+			<td>Создание, удаление, настройка бакетов (версионирование, квоты)</td>
+		</tr>
+	<tr>
+		<td>Object Browser</td>
+		<td>Просмотр объектов</td>
+		<td>Навигация по бакетам, просмотр и управление файлами</td>
+	</tr>
+	<tr>
+		<td>Access Keys</td>
+		<td>Ключи доступа</td>
+		<td>Создание и управление ключами доступа для приложений
+			(важно для API-доступа)</td>
+	</tr>
+	<tr>
+		<td>Policies</td>
+		<td>Политики доступа</td>
+		<td>Создание и назначение политик доступа в формате JSON</td>
+	</tr>
+	<tr>
+		<td>Users</td>
+		<td>Пользователи</td>
+		<td>Управление пользователями и их правами</td>
+	</tr>
+	<tr>
+		<td>Groups</td>
+		<td>Группы</td>
+		<td>Управление группами пользователей</td>
+	</tr>
+	<tr>
+		<td>Settings</td>
+		<td>Настройки</td>
+		<td>Общие настройки MinIO сервера</td>
+	</tr>
+	</tbody>
+</table>
+
+<div class="explanation">
+<strong>Вопрос:</strong> Какие возможности
+веб-консоли вы считаете наиболее
+полезными для администратора хранилища?
+</div>
+
+<h3>2.3 Создание первого бакета через веб-консоль</h3>
+
+<ol>
+	<li>Перейдите в раздел <strong>Buckets</strong> (левое меню).</li>
+	<li>Нажмите кнопку <strong>Create Bucket</strong>.</li>
+	<li>Введите имя бакета: <code>my-first-bucket</code> (по правилам: только
+		строчные буквы, цифры, дефисы).</li>
+	<li>При создании можно настроить:</li>
+	<ul>
+		<li><strong>Versioning</strong> — версионирование объектов
+			(рекомендуется включить для демонстрации)</li>
+		<li><strong>Quota</strong> — ограничение размера бакета</li>
+	</ul>
+	<li>Нажмите <strong>Create Bucket</strong>.</li>
+</ol>
+
+<p class="explanation"><strong>Пояснение:</strong> Бакет — это контейнер для объектов. Имя
+бакета должно быть уникальным в пределах одной инсталляции MinIO.</p>
+
+<h3>2.4 Загрузка объектов через веб-консоль</h3>
+
+<ol>
+	<li><strong>Войдите в бакет:</strong> Нажмите на имя
+		<code>my-first-bucket</code>.</li>
+	<li><strong>Загрузите объект:</strong> Нажмите кнопку <strong>
+		Upload</strong>, выберите любой файл на хосте (например,
+		скриншот или текстовый документ).</li>
+	<li><strong>Добавьте текстовый объект:</strong> Используйте кнопку
+		<strong>Upload</strong> → <strong>Create New
+		File</strong> или просто создайте через CLI позже.</li>
+	<li><strong>Просмотр загруженных объектов:</strong> Теперь в бакете
+		отображаются загруженные файлы.</li>
+</ol>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Как в веб-консоли выглядит иерархия? Есть ли настоящие
+папки или это просто визуальное представление?</p>
+<p><strong>Пояснение:</strong> В объектных хранилищах нет настоящих папок.
+Символ <code>/</code> в имени объекта — это просто разделитель, который веб-интерфейс
+интерпретирует как папку для удобства пользователя.  Это называется &quot;плоское пространство
+имён&quot; (flat namespace).
+</div>
+
+<h3>2.5 Управление объектами через веб-консоль</h3>
+
+<p>Выберите любой загруженный объект и изучите доступные действия:</p>
+
+<table>
+	<thead>
+		<tr>
+			<th>Действие</th>
+			<th>Описание</th>
+		</tr>
+	</thead>
+	<tbody>
+		<tr>
+			<td>Share</td>
+			<td>Создание временной публичной ссылки (presigned URL) для
+				скачивания файла</td>
+		</tr>
+		<tr>
+			<td>Download</td>
+			<td>Скачивание объекта на компьютер</td>
+		</tr>
+		<tr>
+			<td>>Delete</td>
+			<td>Удаление объекта</td>
+		</tr>
+		<tr>
+			<td>Inspect</td>
+			<td>Просмотр метаданных объекта</td>
+		</tr>
+		<tr>
+			<td>Preview</td>
+			<td>Предварительный просмотр (для изображений, текстовых файлов)</td>
+		</tr>
+		<tr>
+			<td>Manage Tags</td>
+			<td>Добавление тегов к объекту (ключ-значение)</td>
+		</tr>
+	</tbody>
+</table>
+
+<h3>2.6 Создание Access Key (для API-доступа)</h3>
+
+<div class="explanation">
+<strong>Важно:</strong> Access Key и Secret Key нужны для подключения к MinIO через API (например, из Python-скриптов boto3). Без них программный доступ будет невозможен.
+</div>
+
+<ol>
+	<li>Перейдите в раздел <strong>Access Keys</strong> (левое меню).</li>
+	<li>Нажмите <strong>Create Access Key</strong>.</li>
+	<li>При желании можно задать имя и политику доступа.</li>
+	<li>Скопируйте сгенерированные <strong>Access Key</strong> и
+		<strong>Secret Key</strong> (они понадобятся на этапе 4).</li>
+</ol>
+
+<p class="explanation"> <strong>Пояснение:</strong> Access Keys — это учётные данные для
+API-доступа к S3-хранилищу. Они работают по аналогии с ключами в AWS IAM. Сами ключи можно
+увидеть только один раз — при создании.</p>
+
+<h3>2.7 Создание presigned URL (публичной ссылки)</h3>
+
+<ol>
+	<li>Выберите любой объект в бакете.</li>
+	<li>Нажмите кнопку <strong>Share</strong> (или иконку с символом ссылки).</li>
+	<li>Установите время действия ссылки (например, 10 минут).</li>
+	<li>Нажмите <strong>Generate</strong>.</li>
+	<li>Скопируйте полученную ссылку и попробуйте открыть её в другом браузере
+		или режиме инкогнито.</li>
+</ol>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Кто может скачать файл по этой ссылке? Почему это безопасно?</p>
+
+<p><strong>Пояснение:</strong> Presigned URL — это подписанный
+запрос на доступ к объекту. Он содержит временный токен, который MinIO проверяет
+перед выдачей файла. Даже если бакет приватный, по такой ссылке файл можно
+скачать в течение указанного времени.  Это основной способ безопасного
+публичного доступа к объектам.
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 3: Работа через командную строку (mcli)</h2>
+
+<h3>3.1 Настройка алиаса для подключения к серверу</h3>
+
+<p><strong>На клиенте (ALT Workstation):</strong></p>
+
+<p>Настройка подключения к MinIO серверу</p>
+
+<pre class="bash">
+mcli alias set myminio http://192.168.56.102:9000 minioadmin minioadmin123
+</pre>
+
+<p>Проверка подключения</p>
+
+<pre class="bash">
+mcli admin info myminio
+</pre>
+
+<p class="explanation"> <strong>Пояснение:</strong> Команда <code>alias set</code> создаёт
+&quot;алиас&quot; (псевдоним) для подключения к серверу. Теперь все команды <code>mcli</code> с
+этим алиасом будут отправляться на наш MinIO сервер.  </p>
+
+<h3>3.2 Базовые операции с бакетами</h3>
+
+<p>Создание бакета</p>
+
+<pre class="bash">
+mcli mb myminio/my-bucket-cli
+</pre>
+
+<p>Просмотр списка бакетов</p>
+
+<pre class="bash">
+mcli ls myminio/
+</pre>
+
+<p>Удаление бакета (только пустого)</p>
+
+<pre class="bash">
+mcli rb myminio/my-bucket-cli
+</pre>
+
+<h3> 3.3 Загрузка и скачивание объектов</h3>
+
+<p>Создание тестового файла</p>
+
+<pre class="bash">
+echo &quot;Hello from CLI&quot; &gt; test.txt
+dd if=/dev/urandom of=largefile.dat bs=1M count=50
+</pre>
+
+<p>Загрузка файла в бакет (аналог PUT)</p>
+
+<pre class="bash">
+mcli cp test.txt myminio/my-first-bucket/
+</pre>
+
+<p>Загрузка с другим именем (ключом)</p>
+
+<pre class="bash">
+mcli cp largefile.dat myminio/my-first-bucket/uploaded/largefile.dat
+</pre>
+
+<p>Просмотр объектов в бакете</p>
+
+<pre class="bash">
+mcli ls myminio/my-first-bucket/
+</pre>
+
+<p>Скачивание объекта</p>
+
+<pre class="bash">
+mcli cp myminio/my-first-bucket/test.txt downloaded.txt
+</pre>
+
+<p>Рекурсивное скачивание всех объектов</p>
+
+<pre class="bash">
+mcli cp --recursive myminio/my-first-bucket/ ./downloaded_all/
+</pre>
+
+<div class="explanation">
+<strong>Вопрос:</strong> Обратите внимание на команду с <code>uploaded/largefile.dat</code>.
+Создалась ли настоящая папка <code>uploaded</code>? Как это проверить?
+</div>
+
+<h3>3.4 Управление правами доступа к бакету</h3>
+
+<p>Просмотр текущих прав</p>
+
+<pre class="bash">
+mcli anonymous get myminio/my-first-bucket
+</pre>
+
+<p>Установка публичного доступа (чтение для всех)</p>
+
+<pre class="bash">
+mcli anonymous set public myminio/my-first-bucket
+</pre>
+
+<p>Установка прав только на скачивание (без списка файлов)</p>
+
+<pre class="bash">
+mcli anonymous set download myminio/my-first-bucket
+</pre>
+
+<p>Возврат к приватному доступу</p>
+
+<pre class="bash">
+mcli anonymous set private myminio/my-first-bucket
+</pre>
+
+<p class="explanation"> <strong>Пояснение:</strong> В MinIO управление правами доступа к бакетам
+осуществляется через команду <code>mcli anonymous</code>. Это аналог политик доступа в AWS S3.</p>
+
+<h3>3.5 Управление Access Keys через CLI</h3>
+
+<p>Создание нового Access Key для пользователя</p>
+
+<pre class="bash">
+mcli admin user svcacct add myminio minioadmin --access-key myaccesskey --secret-key mysecretkey
+</pre>
+
+<p>Список Access Keys</p>
+
+<pre class="bash">
+mcli admin user svcacct list myminio minioadmin
+</pre>
+
+<p>Удаление Access Key</p>
+
+<pre class="bash">
+mcli admin user svcacct rm myminio minioadmin myaccesskey
+</pre>
+
+<h3> 3.6 Синхронизация папок (как rsync)</h3>
+
+<p>Создаём тестовую папку</p>
+
+<pre class="bash">
+mkdir -p test_sync/{folder1,folder2}
+echo &quot;file1 content&quot; &gt; test_sync/file1.txt
+echo &quot;file2 content&quot; &gt; test_sync/folder1/file2.txt
+</pre>
+
+<p>Синхронизация папки с бакетом</p>
+
+<pre class="bash">
+mcli sync ./test_sync/ myminio/my-first-bucket/sync_folder/
+</pre>
+
+<p>Просмотр результата</p>
+
+<pre class="bash">
+mcli tree myminio/my-first-bucket/
+</pre>
+
+<p class="explanation"> <strong>Пояснение:</strong> Команда <code class="cmd">mcli sync</code>
+работает аналогично <code class="cmd">rsync</code> — она копирует только изменённые файлы, что
+эффективно для больших объёмов данных.  </p>
+
+<hr/>
+
+
+
+<h2>Этап 4: Программный доступ через Python (boto3)</h2>
+
+<h3>4.1 Установка boto3 на клиенте</h3>
+
+<p><strong>На клиенте (ALT Workstation):</strong></p>
+
+<p>Установка pip и boto3</p>
+
+<pre class="bash">
+apt-get install python3-module-pip
+pip3 install boto3
+</pre>
+
+<h3> 4.2 Настройка Access Key в переменные окружения</h3>
+
+<p>boto3 автоматически использует переменные окружения <code>AWS_ACCESS_KEY_ID</code> и
+<code>AWS_SECRET_ACCESS_KEY</code>:</p>
+
+<pre class="bash">
+export AWS_ACCESS_KEY_ID=&lt;ваш_access_key&gt;
+export AWS_SECRET_ACCESS_KEY=&lt;ваш_secret_key&gt;
+</pre>
+
+<p class="explanation"> <strong>Пояснение:</strong> Access Key и Secret Key были созданы
+на этапе 2.6. Если вы их не сохранили — создайте новые через веб-консоль или CLI.</p>
+
+<h3>4.3 Написание и выполнение Python-скрипта</h3>
+
+<p>Создайте файл <code>s3_demo.py</code>:</p>
+
+<pre class="python">
+#!/usr/bin/env python3
+import boto3
+from botocore.client import Config
+
+# Конфигурация подключения к MinIO серверу
+MINIO_ENDPOINT = &quot;192.168.56.102:9000&quot;
+ACCESS_KEY = &quot;minioadmin&quot;  # или ваш созданный access key
+SECRET_KEY = &quot;minioadmin123&quot;  # или ваш secret key
+BUCKET_NAME = &quot;my-first-bucket&quot;
+
+# 1. Создаём клиент для S3 (указываем endpoint нашего MinIO)
+s3 = boto3.client(
+    's3',
+    endpoint_url=f'http://{MINIO_ENDPOINT}',
+    aws_access_key_id=ACCESS_KEY,
+    aws_secret_access_key=SECRET_KEY,
+    config=Config(signature_version='s3v4'),
+    region_name='us-east-1'
+)
+
+# 2. Просмотр списка бакетов
+print(&quot;=== Список бакетов ===&quot;)
+buckets = s3.list_buckets()
+for bucket in buckets['Buckets']:
+    print(f&quot;  {bucket['Name']}&quot;)
+
+# 3. Загрузка объекта (PUT)
+print(&quot;\n=== Загрузка объекта ===&quot;)
+with open('test.txt', 'rb') as f:
+    s3.put_object(
+        Bucket=BUCKET_NAME,
+        Key='python/uploaded/from_python.txt',
+        Body=f.read(),
+        Metadata={'author': 'student', 'lab': 's3'}
+    )
+print(&quot;  Файл загружен в my-first-bucket/python/uploaded/from_python.txt&quot;)
+
+# 4. Скачивание объекта (GET)
+print(&quot;\n=== Скачивание объекта ===&quot;)
+response = s3.get_object(Bucket=BUCKET_NAME, Key='test.txt')
+content = response['Body'].read().decode('utf-8')
+print(f&quot;  Содержимое test.txt: {content}&quot;)
+
+# 5. Генерация presigned URL (на 1 час)
+print(&quot;\n=== Генерация presigned URL ===&quot;)
+presigned_url = s3.generate_presigned_url(
+    'get_object',
+    Params={'Bucket': BUCKET_NAME, 'Key': 'test.txt'},
+    ExpiresIn=3600
+)
+print(f&quot;  Ссылка действительна 1 час: {presigned_url}&quot;)
+
+# 6. Получение метаданных объекта (HEAD)
+print(&quot;\n=== Метаданные объекта ===&quot;)
+metadata = s3.head_object(Bucket=BUCKET_NAME, Key='python/uploaded/from_python.txt')
+print(f&quot;  Content-Type: {metadata.get('ContentType', 'unknown')}&quot;)
+print(f&quot;  Size: {metadata['ContentLength']} bytes&quot;)
+print(f&quot;  Metadata: {metadata.get('Metadata', {})}&quot;)
+
+print(&quot;\nГотово!&quot;)
+</pre>
+
+<p>Запустите скрипт:</p>
+
+<pre class="bash">
+python3 s3_demo.py
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Что такое <code>presigned_url</code> в коде? Где в
+реальном приложении это может пригодиться?</p>
+<p><strong>Пояснение:</strong> Boto3 — это официальный AWS SDK для Python. Он
+поддерживает подключение к любому S3-совместимому хранилищу через параметр
+<code>endpoint_url</code>. Это позволяет писать код, который будет работать как с
+Amazon S3, так и с on-premise MinIO.</p>
+</div>
+
+<hr/>
+
+
+
+<h2>Этап 5: Дополнительные эксперименты</h2>
+
+<h3>5.1 Копирование между бакетами на сервере (Server-Side Copy)</h3>
+
+<p>Копирование объекта на сервере без скачивания на клиент</p>
+
+<pre class="bash">
+mcli cp myminio/my-first-bucket/test.txt myminio/my-first-bucket/copy/test_copy.txt
+</pre>
+
+<div class="explanation">
+<p><strong>Вопрос:</strong> Чем отличается эта операция от <code>cp</code> на клиенте?</p>
+<p><strong>Пояснение:</strong> Server-Side Copy выполняется полностью на стороне сервера.
+Клиент не скачивает и не загружает данные, а только отправляет команду копирования.
+Это эффективно для больших файлов.
+</div>
+
+<h3>5.2 Просмотр информации о сервере через CLI</h3>
+
+<p>Статус сервера</p>
+
+<pre class="bash">
+mcli admin info myminio
+</pre>
+
+<p>Просмотр текущих операций</p>
+
+<pre class="bash">
+mcli admin top myminio
+</pre>
+
+<h3> 5.3 Управление контейнером Docker</h3>
+
+<p>Просмотр логов контейнера</p>
+
+<pre class="bash">
+docker logs minio-server
+</pre>
+
+<p>Перезапуск контейнера</p>
+
+<pre class="bash">
+docker restart minio-server
+</pre>
+
+<p>Остановка контейнера</p>
+
+<pre class="bash">
+docker stop minio-server
+</pre>
+
+<p>Запуск остановленного контейнера</p>
+
+<pre class="bash">
+docker start minio-server
+</pre>
+
+<hr/>
+
+
+
+<h2>Этап 6: Очистка</h2>
+
+<p><strong>На сервере:</strong></p>
+
+<p>Останавливаем и удаляем контейнер</p>
+
+<pre class="bash">
+docker stop minio-server
+docker rm minio-server
+</pre>
+
+<p>Опционально: очищаем данные</p>
+
+<pre class="bash">
+rm -rf /data/minio
+</pre>
+
+<p><strong>На клиенте:</strong></p>
+
+<p>Удаляем тестовые файлы</p>
+
+<pre class="bash">
+rm -f test.txt largefile.dat downloaded.txt s3_demo.py
+</pre>
+
+<p>Удаляем временные папки</p>
+
+<pre class="bash">
+rm -rf downloaded_all/ test_sync/
+</pre>
+
+<hr/>
+
+
+
+<h2>Контрольные вопросы</h2>
+
+<ol>
+	<li>В чем разница между архитектурой, где всё работает на одном хосте, и клиент-серверной
+		архитектурой, которую мы использовали?</li>
+	<li>Почему в лабораторной работе используется старая версия MinIO
+		(<code>RELEASE.2025-04-22T22-12-26Z</code>)? Какие изменения произошли в более
+		новых версиях?</li>
+	<li>Какой порт отвечает за веб-консоль MinIO, а какой за API?</li>
+	<li>Что такое Access Key и Secret Key? Зачем они нужны?</li>
+	<li>Что такое presigned URL и для чего он используется? Приведите пример
+		реального применения.</li>
+	<li>Что означает понятие &quot;плоское пространство имён&quot; (flat namespace) в
+		объектных хранилищах? Как это проявляется в веб-консоли и CLI?</li>
+	<li>Какие ключевые разделы есть в веб-консоли MinIO? Для чего предназначен
+		каждый из них?</li>
+	<li>Как сгенерировать публичную ссылку на объект через веб-консоль? А через CLI?</li>
+	<li>В чем преимущество Server-Side Copy перед обычным копированием через клиент?</li>
+	<li>Как boto3 подключается к MinIO, а не к Amazon S3? Какой параметр для
+		этого используется?</li>
+</ol>
+
+<hr/>
+
+
+
+<h2>Шпаргалка для студентов</h2>
+
+<table>
+	<thead>
+		<tr>
+			<th>Действие</th>
+			<th>Команда (на клиенте)</th>
+		</tr>
+	</thead>
+	<tbody>
+		<tr>
+			<td>Запуск MinIO контейнера</td>
+			<td><code class="cmd">docker
+				run -d --name minio-server -p 9000:9000 -p 9001:9001 -v
+				/data/minio:/data -e &quot;MINIO_ROOT_USER=minioadmin&quot; -e
+				&quot;MINIO_ROOT_PASSWORD=minioadmin123&quot;
+				quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+				--console-address &quot;:9001&quot;</code></td>
+		</tr>
+		<tr>
+			<td>Установка алиаса mcli</td>
+			<td><code class="cmd">mcli alias set myminio
+				http://IP:9000 minioadmin minioadmin123</code></td>
+		</tr>
+		<tr>
+			<td>Проверка подключения</td>
+			<td><code class="cmd">mcli admin info myminio</code></td>
+		</tr>
+		<tr>
+			<td>Создание бакета</td>
+			<td><code class="cmd">mcli mb myminio/my-bucket</code></td>
+		</tr>
+		<tr>
+			<td>Загрузка файла</td>
+			<td><code class="cmd">mcli cp file.txt myminio/my-bucket/</code></td>
+		</tr>
+		<tr>
+			<td>Скачивание файла</td>
+			<td><code class="cmd">mcli cp myminio/my-bucket/file.txt ./</code></td>
+		</tr>
+		<tr>
+			<td>Синхронизация папки</td>
+			<td><code class="cmd">mcli sync
+				./folder/ myminio/my-bucket/folder/</code></td>
+		</tr>
+		<tr>
+			<td>Presigned URL</td>
+			<td><code class="cmd">mcli share download myminio/my-bucket/file.txt
+				--expiry 1h</code></td>
+		</tr>
+		<tr>
+			<td>Доступ к веб-консоли</td>
+			<td><code class="cmd">http://192.168.56.102:9001</code></td>
+		</tr>
+		<tr>
+			<td>Управление правами бакета</td>
+			<td><code class="cmd">mcli anonymous set public
+				myminio/my-bucket</code></td>
+		</tr>
+		<tr>
+			<td>Просмотр логов контейнера</td>
+			<td><code class="cmd">docker logs minio-server</code></td>
+		</tr>
+	</tbody>
+</table>
+
+<hr/>
+
+
+
+<h2>Выводы</h2>
+
+<ul>
+	<li>MinIO предоставляет S3-совместимое объектное хранилище, которое можно развернуть
+		на собственном сервере.</li>
+	<li>В мае 2025 года MinIO изменила политику распространения: в community-версии из
+		веб-консоли удалены административные функции. Для полноценной работы используется
+		версия <code>RELEASE.2025-04-22T22-12-26Z</code>.</li>
+	<li>В лабораторной работе использована реальная клиент-серверная архитектура: сервер
+		в виртуальной машине, клиент на хосте.</li>
+	<li>При установке MinIO Client нужно учитывать возможный конфликт имён с Midnight
+		Commander (<code>mc</code> → <code>mcli</code>).</li>
+	<li>Веб-консоль MinIO (порт 9001) предоставляет удобный графический интерфейс для
+		управления бакетами, ключами доступа и пользователями.</li>
+	<li>Presigned URL — ключевой механизм безопасного публичного доступа к объектам в
+		приватных бакетах.</li>
+	<li>Boto3 — стандартный SDK для работы с S3 из Python, который легко переключается между
+		облачным S3 и on-premise MinIO через параметр <code>endpoint_url</code>.</li>
+</ul>
+
+<hr/>
+
+</body>
+</html>

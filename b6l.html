@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="ru-RU">
+
+  <head>
+    <title>SHD</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="shd.css">
+  </head>
+
+<body>
+
+<h1>Лекция 8. Блочные сети: iSCSI</h1>
+
+<p><strong>Цель лекции:</strong> Сформировать понимание принципов работы блочных сетей на
+примере iSCSI, объяснить отличие от файловых протоколов (NFS/SMB), архитектуру iSCSI (Target,
+Initiator, LUN, IQN), разобрать сценарии использования, производительность и безопасность.</p>
+
+<hr/>
+
+
+
+<h2>Введение</h2>
+
+<p>На прошлых занятиях мы говорили о файловых сетевых протоколах — NFS и SMB. Они отлично
+подходят для организации общего доступа к файлам, где сервер управляет файловой системой,
+а клиент видит привычную структуру папок и файлов.</p>
+
+<p>Но есть сценарии, где файловый доступ недостаточен:</p>
+<ul>
+	<li><strong>Виртуализация:</strong> Гипервизору (VMware ESXi, KVM) нужно
+		блочное устройство, на котором он сам создаст свою файловую систему и
+		разместит виртуальные машины.</li>
+	<li><strong>Базы данных:</strong> Некоторые СУБД работают эффективнее,
+		когда имеют прямой доступ к блочному устройству.</li>
+	<li><strong>Кластерные файловые системы:</strong> Требуют, чтобы все узлы
+		видели один и тот же набор блоков (например, GFS2, OCFS2).</li>
+	<li><strong>Загрузка с сети (iSCSI boot):</strong> Сервер может загружаться
+		с удалённого диска, не имея локального накопителя.</li>
+</ul>
+
+<p>Здесь на сцену выходят <strong>блочные сети</strong>. Самый распространённый
+протокол в этой категории — <strong>iSCSI</strong> (Internet Small Computer
+System Interface). Он позволяет передавать команды SCSI по TCP/IP-сети, превращая
+удалённое дисковое устройство в локальный диск.</p>
+
+<hr/>
+
+
+
+<h2>Часть 1. От SCSI к iSCSI</h2>
+
+<h3>1.1 Что такое SCSI?</h3>
+
+<p>SCSI (Small Computer System Interface) — это набор стандартов для подключения периферийных
+устройств (дисков, ленточных накопителей, сканеров), разработанный в 1980-х годах.</p>
+
+<p><strong>Ключевые понятия SCSI:</strong></p>
+<ul>
+	<li><strong>Initiator (инициатор):</strong> Устройство, которое инициирует
+		операции (обычно компьютер).</li>
+	<li><strong>Target (цель):</strong> Устройство, которое выполняет операции
+		(диск, массив).</li>
+	<li><strong>LUN (Logical Unit Number):</strong> Логический номер устройства
+		внутри Target. Один Target может иметь несколько LUN (например, несколько
+		виртуальных дисков).</li>
+</ul>
+
+<p>SCSI был разработан как <strong>параллельный интерфейс</strong> (SCSI-1, SCSI-2,
+SCSI-3) — толстые кабели, ограниченная длина (до 12-25 метров), жёсткие требования к
+терминированию.  Но сам протокол (набор команд) оказался настолько удачным, что его
+адаптировали для других физических интерфейсов.</p>
+
+<h3>1.2 Эволюция: SAS, Fibre Channel, iSCSI</h3>
+
+<table>
+	<thead>
+		<tr>
+			<th>Интерфейс</th>
+			<th>Физическая среда</th>
+			<th>Макс. длина</th>
+			<th>Скорость</th>
+			<th>Применение</th>
+		</tr>
+	</thead>
+	<tbody>
+		<tr>
+			<td>Parallel SCSI</td>
+			<td>Медный кабель</td>
+			<td>12-25 м</td>
+			<td>До 320 МБ/с</td>
+			<td>Устарел</td>
+		</tr>
+		<tr>
+			<td>SAS (Serial Attached SCSI)</td>
+			<td>Медный кабель</td>
+			<td>10 м</td>
+			<td>До 24 Гбит/с (SAS-4)</td>
+			<td>Внутреннее подключение дисков в серверах</td>
+		</tr>
+		<tr>
+			<td>Fibre Channel (FC)</td>
+			<td>Оптика (или медь)</td>
+			<td>10-100 км</td>
+			<td>До 128 Гбит/с (Gen7)</td>
+			<td>Корпоративные SAN, дисковые полки</td>
+		</tr>
+		<tr>
+			<td>iSCSI</td>
+			<td>Ethernet (TCP/IP)</td>
+			<td>Любая (IP-сеть)</td>
+			<td>До 100 Гбит/с (и выше)</td>
+			<td>Блочные сети на стандартном оборудовании</td>
+		</tr>
+	</tbody>
+</table>
+
+<h3>1.3 Что такое iSCSI?</h3>
+
+<p>iSCSI — это протокол, который инкапсулирует SCSI-команды в TCP/IP-пакеты. Он позволяет:</p>
+<ul>
+	<li>Использовать существующую Ethernet-инфраструктуру для передачи SCSI-команд.</li>
+	<li>Организовывать блочный доступ к хранилищу на любом расстоянии (в пределах IP-сети).</li>
+	<li>Применять все преимущества TCP: надёжность, управление потоком, маршрутизация.</li>
+</ul>
+
+<p><strong>Аналогия:</strong> Если NFS и SMB — это доставка &quot;заказных блюд&quot;
+(файлов), то iSCSI — это доставка &quot;ингредиентов&quot; (сырых блоков), из которых клиент
+сам готовит своё блюдо.</p>
+
+<hr/>
+
+
+
+<h2>Часть 2. Архитектура iSCSI</h2>
+
+<h3>2.1 Компоненты</h3>
+
+<p><strong>1. iSCSI Target (цель)</strong></p>
+<ul>
+	<li>Это серверная часть, которая предоставляет блочные устройства по сети.</li>
+	<li>Target может быть:</li>
+	<ul>
+		<li>Аппаратным (дисковый массив, SAN-контроллер).</li>
+		<li>Программным (Linux targetcli, Windows iSCSI Target, FreeBSD ctld).</li>
+	</ul>
+	<li>Target идентифицируется по <strong>IQN (iSCSI Qualified Name).</strong></li>
+</ul>
+
+<p><strong>2. iSCSI Initiator (инициатор)</strong></p>
+<ul>
+	<li>Это клиентская часть, которая подключается к Target и получает блочное устройство.</li>
+	<li>Initiator может быть:</li>
+	<ul>
+		<li>Встроенным в ОС (Linux: <code>open-iscsi</code>, Windows: <code>Microsoft
+			iSCSI Initiator</code>).</li>
+		<li>Аппаратным (HBA — Host Bus Adapter, разгружающий CPU).</li>
+	</ul>
+	<li>Initiator также имеет свой IQN.</li>
+</ul>
+
+<p><strong>3. LUN (Logical Unit Number)</strong></p>
+<ul>
+	<li>Это виртуальный диск, который Target предоставляет Initiator'у.</li>
+	<li>LUN может быть создан на основе:</li>
+	<ul>
+		<li>Физического диска.</li>
+		<li>RAID-массива.</li>
+		<li>Файла (file-backed LUN).</li>
+		<li>Тома LVM/ZFS.</li>
+	</ul>
+</ul>
+
+<p><strong>4. IQN (iSCSI Qualified Name)</strong></p>
+<ul>
+	<li>Уникальный идентификатор iSCSI-устройства.</li>
+	<li>Формат: <code>iqn.yyyy-mm.naming-authority:unique-name</code></li>
+	<li>Пример: <code>iqn.2025-03.com.example:storage.target1</code></li>
+</ul>
+
+<p><strong>5. Portal (портал)</strong></p>
+<ul>
+	<li>Комбинация IP-адреса и TCP-порта (обычно 3260), на котором Target
+		слушает соединения.</li>
+</ul>
+
+<h3>2.2 Схема взаимодействия</h3>
+
+<img src="img/b6.c2.2.png"><br/>
+
+<h3>2.3 Этапы установки соединения</h3>
+<ol>
+	<li><strong>Discovery (обнаружение):</strong> Initiator отправляет запрос
+		на Target Portal, чтобы узнать доступные Target.</li>
+	<li><strong>Login (авторизация):</strong> Initiator аутентифицируется (CHAP)
+		и устанавливает сессию.</li>
+	<li><strong>SCSI command flow:</strong> Initiator отправляет SCSI-команды
+		(READ, WRITE, INQUIRY и т.д.), Target выполняет их и возвращает ответ.</li>
+</ol>
+
+<hr/>
+
+
+
+<h2>Часть 3. Компоненты iSCSI в Linux</h2>
+
+<h3>3.1 Software Initiator: open-iscsi</h3>
+
+<p>В Linux стандартным iSCSI-инициатором является пакет <code>open-iscsi</code>.</p>
+
+<p><strong>Основные файлы и команды:</strong></p>
+<ul>
+	<li><code>/etc/iscsi/initiatorname.iscsi</code> — содержит IQN инициатора.</li>
+	<li><code>/etc/iscsi/iscsid.conf</code> — настройки (CHAP, таймауты).</li>
+	<li><code>iscsiadm</code> — основная утилита управления.</li>
+</ul>
+
+<p><strong>Основные операции:</strong></p>
+
+<p>Просмотр IQN</p>
+
+<pre class="bash">
+cat /etc/iscsi/initiatorname.iscsi
+</pre>
+
+<p>Обнаружение Target</p>
+
+<pre class="bash">
+iscsiadm -m discovery -t st -p 192.168.1.10
+</pre>
+
+<p>Подключение к Target</p>
+
+<pre class="bash">
+iscsiadm -m node -T iqn.2025-03.com.example:storage.target1 -p 192.168.1.10 -l
+</pre>
+
+<p>Просмотр активных сессий</p>
+
+<pre class="bash">
+iscsiadm -m session
+</pre>
+
+<p>Отключение</p>
+
+<pre class="bash">
+iscsiadm -m node -T iqn.2025-03.com.example:storage.target1 -p 192.168.1.10 -u
+</pre>
+
+<p>После успешного подключения в системе появляется новое блочное устройство (например,
+<code>/dev/sdb</code>), с которым можно работать как с обычным диском — размечать,
+создавать ФС, монтировать.</p>
+
+<h3>3.2 Software Target: targetcli (LIO)</h3>
+
+<p>В Linux стандартным iSCSI-таргетом является LIO (Linux-IO Target), управляемый через утилиту
+ <code class="cmd">targetcli</code>.</p>
+
+<p><strong>Иерархия targetcli:</strong></p>
+
+<pre class="text">
+/
+├── backstores/          # Хранилища (backstores)
+│   ├── fileio/          # Файлы как LUN
+│   ├── block/           # Блочные устройства как LUN
+│   ├── pscsi/           # Физические SCSI-устройства
+│   └── ramdisk/         # Оперативная память (для тестов)
+├── iscsi/               # iSCSI targets
+│   └── iqn.2025-03.com.example:storage.target1/
+│       └── tpg1/        # Target Portal Group
+│           ├── portals/ # IP:порт
+│           ├── luns/    # LUNs (ссылки на backstores)
+│           └── acls/    # Access Control Lists
+└── loopback/            # Для локального подключения (без сети)
+</pre>
+
+<p><strong>Пример настройки:</strong></p>
+
+<pre class="bash">
+# Запуск targetcli
+sudo targetcli
+
+# Создание backstore из файла
+/&gt; backstores/fileio create file1 /srv/iscsi/disk1.img 10G
+
+# Создание iSCSI target
+/&gt; iscsi/ create iqn.2025-03.com.example:storage.target1
+
+# Создание портала (IP:порт)
+/&gt; iscsi/iqn.2025-03.com.example:storage.target1/tpg1/portals/ create 0.0.0.0 3260
+
+# Создание LUN, указывающего на backstore
+/&gt; iscsi/iqn.2025-03.com.example:storage.target1/tpg1/luns/ create /backstores/fileio/file1
+
+# Создание ACL (разрешить доступ конкретному инициатору)
+/&gt; iscsi/iqn.2025-03.com.example:storage.target1/tpg1/acls/ create iqn.1993-08.org.debian:01:client1
+
+# Сохранение конфигурации
+/&gt; saveconfig
+/&gt; exit
+</pre>
+
+<h3> 3.3 Аутентификация: CHAP</h3>
+
+<p>CHAP (Challenge-Handshake Authentication Protocol) — это протокол аутентификации,
+используемый iSCSI.</p>
+
+<p><strong>На Target (в targetcli):</strong></p>
+
+<pre class="bash">
+/&gt; iscsi/iqn.2025-03.com.example:storage.target1/tpg1/acls/iqn.1993-08.org.debian:01:client1/
+    set auth userid=clientuser
+    set auth password=secretpass
+</pre>
+
+<p><strong>На Initiator (в /etc/iscsi/iscsid.conf):</strong></p>
+
+<pre class="bash">
+node.session.auth.authmethod = CHAP
+node.session.auth.username = clientuser
+node.session.auth.password = secretpass
+</pre>
+
+<h3>3.4 Многопутевой доступ (MPIO, Multipath I/O)</h3>
+
+<p>Для отказоустойчивости и увеличения пропускной способности используют <strong>
+Multipath I/O</strong>. Initiator подключается к одному Target через несколько
+сетевых путей (разные сетевые интерфейсы, разные коммутаторы).</p>
+
+<p><strong>Схема:</strong></p>
+
+<pre class="text">
+Initiator ── eth0 ── Switch A ── Target (порт 1)
+        └─── eth1 ── Switch B ── Target (порт 2)
+</pre>
+
+<p>В Linux за управление многопутевым доступом отвечает <code>multipath-tools</code>.
+Система видит одно устройство <code>/dev/mapper/mpathX</code>, которое объединяет
+несколько физических путей.</p>
+
+<hr/>
+
+
+
+<h2>Часть 4. Сравнение iSCSI с другими протоколами</h2>
+
+<table>
+	<thead>
+		<tr>
+			<th>Характеристика</th>
+			<th>iSCSI</th>
+			<th>Fibre Channel (FC)</th>
+			<th>NVMe-oF</th>
+			<th>NFS/SMB</th>
+		</tr>
+	</thead>
+	<tbody>
+		<tr>
+			<td>Тип доступа </td>
+			<td>Блочный</td>
+			<td>Блочный</td>
+			<td>Блочный</td>
+			<td>Файловый </td>
+		</tr>
+		<tr>
+			<td>Физическая среда</td>
+			<td>Ethernet (TCP/IP)</td>
+			<td>Оптика (специализированная)</td>
+			<td>Ethernet/RDMA/FC</td>
+			<td>Ethernet</td>
+		</tr>
+		<tr>
+			<td>Требования к сети</td>
+			<td>Стандартная IP-сеть</td>
+			<td>Выделенная SAN-сеть</td>
+			<td>Высокоскоростная, низкая задержка</td>
+			<td>Стандартная IP-сеть</td>
+		</tr>
+		<tr>
+			<td>Задержка</td>
+			<td>Средняя (TCP оверхед)</td>
+			<td>Очень низкая</td>
+			<td>Минимальная (RDMA)</td>
+			<td>Средняя/высокая</td>
+		</tr>
+		<tr>
+			<td>Протокол</td>
+			<td>TCP/IP</td>
+			<td>FC-протокол</td>
+			<td>NVMe (через TCP/RDMA) </td>
+			<td>NFS/SMB</td>
+		</tr>
+		<tr>
+			<td>Стоимость оборудования</td>
+			<td>Низкая (стандартный Ethernet)</td>
+			<td>Высокая (FC-коммутаторы, HBA)</td>
+			<td>Средняя/высокая</td>
+			<td>Низкая</td>
+		</tr>
+		<tr>
+			<td>Использование CPU</td>
+			<td>Заметное (TCP/IP стек)</td>
+			<td>Низкое (аппаратная разгрузка)</td>
+			<td>Низкое (RDMA, offload)</td>
+			<td>Среднее</td>
+		</tr>
+		<tr>
+			<td>Применение</td>
+			<td>SMB, виртуализация, бэкапы</td>
+			<td>Крупные корпоративные SAN </td>
+			<td>Высокопроизводительные хранилища, HPC</td>
+			<td>Общий доступ к файлам</td>
+		</tr>
+		<tr>
+			<td>Сложность настройки</td>
+			<td>Средняя</td>
+			<td>Высокая</td>
+			<td>Средняя/высокая</td>
+			<td>Низкая/средняя </td>
+		</tr>
+	</tbody>
+</table>
+
+<hr/>
+
+
+
+<h2>Часть 5. Сценарии использования iSCSI</h2>
+
+<h3>5.1 Виртуализация (VMware ESXi, KVM)</h3>
+
+<p>Это самый популярный сценарий. Гипервизор подключается к iSCSI-таргету и видит LUN
+как локальный диск. На этом диске гипервизор создаёт свою файловую систему (VMFS для
+ESXi, LVM/QCOW2 для KVM) и размещает виртуальные машины.</p>
+
+<p><strong>Преимущества:</strong></p>
+<ul>
+	<li>Централизованное управление хранилищем.</li>
+	<li>Живая миграция (vMotion, live migration) без перемещения данных.</li>
+	<li>Использование возможностей SAN (снапшоты, репликация).</li>
+</ul>
+
+<h3>5.2 Загрузка с сети (iSCSI Boot)</h3>
+
+<p>Серверы без локальных дисков (diskless) могут загружаться с iSCSI-диска. Для этого:</p>
+<ol>
+	<li>В BIOS/UEFI настраивается сетевой загрузчик (iSCSI Boot Firmware Table).</li>
+	<li>Сервер подключается к iSCSI-таргету, где находится загрузочный образ.</li>
+	<li>Система загружается, корневая ФС находится на удалённом LUN.</li>
+</ol>
+
+<p><strong>Применение:</strong> Бездисковые рабочие станции, серверы в дата-центрах,
+упрощение замены оборудования.</p>
+
+<h3>5.3 Базы данных и высоконагруженные приложения</h3>
+
+<p>Некоторые СУБД (Oracle, MS SQL) работают эффективнее с прямым блочным доступом, особенно
+с использованием асинхронного ввода-вывода (AIO). iSCSI позволяет вынести дисковую подсистему
+на отдельное хранилище, сохранив производительность, близкую к локальным дискам.</p>
+
+<h3>5.4 Резервное копирование</h3>
+
+<p>iSCSI используется для предоставления &quot;сырых&quot; дисков бэкапным серверам.
+Это позволяет делать образные бэкапы (snapshot-based backups) и восстанавливать целые системы.</p>
+
+<h3>5.5 Кластерные файловые системы</h3>
+
+<p>Технологии типа GFS2, OCFS2, VMFS требуют, чтобы все узлы кластера имели одновременный
+доступ к одним и тем же блочным устройствам.  iSCSI предоставляет такую возможность,
+позволяя строить кластеры на стандартном Ethernet.</p>
+
+<hr/>
+
+
+
+<h2>Часть 6. Производительность, безопасность, отказоустойчивость</h2>
+
+<h3>6.1 Производительность</h3>
+
+<p><strong>Факторы, влияющие на производительность iSCSI:</strong></p>
+<ol>
+	<li><strong>Сетевая инфраструктура:</strong></li>
+	<ul>
+		<li>Рекомендуется выделенная сеть (VLAN или физически отдельные коммутаторы).</li>
+		<li>Использование Jumbo Frames (MTU 9000) снижает оверхед.</li>
+		<li>Для высоких нагрузок — 10/25/40/100 GbE.</li>
+	</ul>
+	<li><strong>TCP-параметры:</strong></li>
+	<ul>
+		<li>Настройка TCP-буферов (net.ipv4.tcp_rmem, tcp_wmem).</li>
+		<li>Включение TCP offloading на сетевых картах (TSO, LRO).</li>
+	</ul>
+	<li><strong>Аппаратный iSCSI HBA:</strong></li>
+	<ul>
+		<li>Специализированные карты разгружают CPU от обработки TCP/IP и SCSI.</li>
+		<li>Обеспечивают загрузку с iSCSI (iSCSI Boot).</li>
+	</ul>
+	<li><strong>iSCSI vs NFS:</strong></li>
+	<ul>
+		<li>Для баз данных iSCSI часто показывает лучшие результаты из-за меньшего
+			оверхеда на уровне протокола.</li>
+		<li>Для файловых серверов NFS может быть проще и достаточно производительным.</li>
+	</ul>
+</ol>
+
+<h3>6.2 Безопасность</h3>
+
+<p><strong>Рекомендации:</strong></p>
+<ul>
+	<li><strong>Выделенная сеть:</strong> iSCSI не должен идти через публичные
+		сети без шифрования.</li>
+	<li><strong>CHAP:</strong> Обязательная аутентификация (как однонаправленный,
+		так и двунаправленный CHAP).</li>
+	<li><strong>ACL:</strong> Ограничение доступа по IQN и IP-адресам.</li>
+	<li><strong>Шифрование:</strong> При использовании по открытым сетям — IPsec
+		(iSCSI не имеет встроенного шифрования, в отличие от SMB 3.0 или NFSv4.2).</li>
+	<li><strong>Сетевое разделение:</strong> Использование VLAN, изоляция трафика
+		iSCSI от остального.</li>
+</ul>
+
+<h3>6.3 Отказоустойчивость</h3>
+
+<ol>
+	<li><strong>Multipath I/O (MPIO):</strong></li>
+	<ul>
+		<li>Несколько сетевых путей между Initiator и Target.</li>
+		<li>Автоматическое переключение при отказе канала или коммутатора.</li>
+		<li>Балансировка нагрузки (round-robin).</li>
+	</ul>
+	<li><strong>Кластеризация Target:</strong></li>
+	<ul>
+		<li>Active-Passive кластеры iSCSI-таргетов (например, на основе DRBD или
+			корпоративных SAN).</li>
+		<li>При отказе одного Target, Initiator переподключается к другому (может
+			потребоваться настройка таймаутов).</li>
+	</ul>
+	<li><strong>Репликация:</strong></li>
+	<ul>
+		<li>На уровне хранилища (LUN-репликация).</li>
+		<li>Синхронная или асинхронная на удалённую площадку.</li>
+	</ul>
+	<li><strong>Настройка таймаутов:</strong></li>
+	<ul>
+		<li>Важно правильно настроить таймауты iSCSI (например,
+			<code>node.session.timeo.replacement_timeout</code>), чтобы
+			система не &quot;падала&quot; при временных проблемах сети.</li>
+	</ul>
+</ol>
+
+<hr/>
+
+
+
+<h2>Часть 7. Ограничения и подводные камни</h2>
+
+<ol>
+	<li><strong>TCP-зависимость:</strong> iSCSI использует TCP, что означает:</li>
+	<ul>
+		<li>При потере пакетов происходит ретрансляция, что может привести
+			к росту задержек.</li>
+		<li>Для критичных нагрузок требует качественной сети.</li>
+	</ul>
+	<li><strong>Коррупция данных:</strong> Если несколько инициаторов одновременно
+		пишут в один LUN без кластерной файловой системы, данные будут разрушены. iSCSI
+		не предотвращает это — ответственность на администраторе.</li>
+	<li><strong>Производительность при синхронной записи:</strong> Если LUN размещён
+		на файле (fileio), а не на блочном устройстве (block), может быть дополнительный
+		оверхед.</li>
+	<li><strong>Сложность отладки:</strong> Проблемы iSCSI часто связаны с сетью, но
+		проявляются как проблемы диска. Диагностика требует опыта.</li>
+	<li><strong>Совместимость:</strong> Разные реализации iSCSI (Microsoft iSCSI
+		Target, LIO, FreeBSD ctld) могут иметь нюансы совместимости, особенно с
+		продвинутыми функциями (VAAI, ODX).</li>
+</ol>
+
+<hr/>
+
+
+
+<h2>Резюме и вопросы</h2>
+
+<p><strong>Ключевые выводы:</strong></p>
+
+<ol>
+	<li><code>iSCSI</code> — это протокол блочного доступа по IP-сетям, инкапсулирующий
+		SCSI-команды в TCP/IP.</li>
+	<li>Основные компоненты: <code>Initiator</code> (клиент) и <code>Target</code> (сервер),
+		идентифицируемые по <code>IQN</code>.</li>
+	<li>В Linux iSCSI реализуется через <code>open-iscsi</code> (Initiator) и
+		 <code>targetcli/LIO</code> (Target).</li>
+	<li>iSCSI позволяет строить централизованные хранилища для виртуализации, загрузки
+		с сети, баз данных.</li>
+	<li>Для отказоустойчивости используется <code>Multipath I/O (MPIO)</code>.</li>
+	<li>По сравнению с NFS/SMB — это блочный доступ (низкоуровневый), по сравнению
+	с Fibre Channel — более доступный, но с большей загрузкой CPU и задержками.</li>
+	<li>Безопасность обеспечивается выделенными сетями, CHAP-аутентификацией и ACL.</li>
+</ol>
+
+<p><strong>Вопросы для самопроверки:</strong></p>
+
+<ol>
+	<li>В чём принципиальное отличие iSCSI от NFS с точки зрения того, что видит клиент?</li>
+	<li>Что такое IQN и из каких частей он состоит?</li>
+	<li>Какие команды нужны для обнаружения и подключения к iSCSI-таргету в Linux?</li>
+	<li>Зачем нужен Multipath I/O и как он работает?</li>
+	<li>Какие существуют способы аутентификации в iSCSI?</li>
+	<li>В каких сценариях iSCSI предпочтительнее NFS, а в каких — наоборот?</li>
+	<li>Какие риски существуют при подключении нескольких инициаторов к одному LUN без
+		кластерной ФС?</li>
+	<li>Почему для iSCSI рекомендуется выделенная сеть и Jumbo Frames?</li>
+</ol>
+
+<p>На следующих двух практических занятиях мы:</p>
+
+<ul>
+	<li>Настроим iSCSI Target на Linux с использованием targetcli, создадим LUN на основе
+		файла и блочного устройства.</li>
+	<li>Подключимся с помощью open-iscsi, создадим на LUN файловую систему и
+		 смонтируем её.</li>
+	<li>Организуем Multipath I/O с двумя сетевыми путями.</li>
+	<li>Сымитируем отказ сети и проверим автоматическое переключение.</li>
+</ul>
+
+<hr/>
+
+</body>
+</html>
